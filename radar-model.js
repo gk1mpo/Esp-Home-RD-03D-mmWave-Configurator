@@ -8,6 +8,7 @@ export class RadarModel {
     this.targets = [];   // [{x,y,velocity,intensity}, …]
     this._listeners = new Set();
 
+
     // Bubble transform changes up to model observers
     this.transform.onChange(() => this._emitChange("transform"));
   }
@@ -19,6 +20,7 @@ export class RadarModel {
 
   // === State mutators ===
   updateZones(newZones) {
+    // If canvas is present, let it clamp; otherwise just trust input
     this.zones = structuredClone(newZones);
     this._emitChange("zones");
   }
@@ -27,11 +29,37 @@ export class RadarModel {
     this.targets = structuredClone(newTargets);
     this._emitChange("targets");
   }
+  updateRadarPose({ angleDeg, rangeM, silent = false }) {
+    const t = this.transform;
+    if (!t) return;
 
-  updateRadarPose({ angleDeg, rangeM }) {
-    if (angleDeg !== undefined) this.transform.setAngle(angleDeg);
-    if (rangeM !== undefined) this.transform.setMaxRange(rangeM);
-  }
+    if (angleDeg !== undefined)
+      t.setAngle(angleDeg, silent);
+
+    if (rangeM !== undefined)
+      t.setMaxRange(rangeM, silent);
+
+    if (!silent) this._emitChange("transform");
+  }/*
+  updateRadarPose({ angleDeg, rangeM, silent = false }) {
+    const t = this.transform;
+
+    if (!t) return;
+
+    if (silent) {
+      if (angleDeg !== undefined) {
+        t.theta = angleDeg * Math.PI / 180;
+      }
+
+      if (rangeM !== undefined) t.maxRange = rangeM;
+
+    } else {
+      if (angleDeg !== undefined) t.setAngle(angleDeg);
+      if (rangeM !== undefined) t.setMaxRange(rangeM);
+    }
+
+    if (!silent) this._emitChange("transform");
+  }*/
 
   setCanvasSize(w, h) { this.transform.setCanvasSize(w, h); }
 }

@@ -30,8 +30,17 @@ export class RadarTransform {
   // === Mutators ===
   setOrigin(x, y) { this.origin = { x, y }; this._emitChange(); }
   setScale(pxPerMeter) { this.scale = pxPerMeter; this._emitChange(); }
-  setAngle(deg) { this.theta = deg * Math.PI / 180; this._emitChange(); }
-  setMaxRange(m) { this.maxRange = m; this._emitChange(); }
+
+  setAngle(deg, silent = false) {
+    this.theta = deg * Math.PI / 180;
+    if (!silent) this._emitChange();
+  }
+
+  setMaxRange(m, silent = false) {
+    this.maxRange = m;
+    if (!silent) this._emitChange();
+  }
+
   setCanvasSize(w, h) { this.canvasWidth = w; this.canvasHeight = h; this._emitChange(); }
   setDpiScale(ratio) { this.dpiScale = ratio; this._emitChange(); }
 

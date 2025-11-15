@@ -1,15 +1,686 @@
 export class RadarCanvas {
-    constructor(canvas) {
+    constructor(canvas, model, options = {}) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
+        this.model = model || null;     // ✅ model is required for updateZones()
+        this.card = options.card || null; // ✅ optional: parent card for push/save
 
         this.SCALE = 10;
         this.origin = { x: 0, y: 0 };
         this.theta = 0;       // radians
         this.maxRange = 6;    // metres
-         this.zones = {};
+        this.zones = {};
         this.targets = {};
+        this._ready = false;
+        this._sizeValid = false;
+        this._suppressModelSync = false;
+
+        // === UI interaction state ===
+        this.ui = {
+            mode: 'view',              // possible: 'view', 'edit'
+            pointerId: null,
+            pressId: null,
+            hoverId: null,
+            activeZoneId: null,
+            activeHandle: null,
+            dragStart: null,
+            originalZone: null
+        };
+        // === UI feedback for toolbar buttons ===
+
+        this._uiFeedback = { hoverId: null, pressId: null, flash: null };
+        this._setupButtons();
+        this.installPointerHandlers();
     }
+    bindModel(model) {
+        this.model = model;
+        this._ready = true; // the canvas is now tied to a data source
+        this.waitForStableSize(() => {
+            this.resize();
+            this.draw();
+        });
+
+        // Subscribe to model updates
+        model.onChange((type) => {
+            if (this._suppressModelSync) {
+                //console.warn('[RadarCanvas] Model sync suppressed');
+                return;
+            }
+            //console.warn('[RadarCanvas] Model sync Not suppressed');
+            const prevActive = this.ui.activeZoneId;  // 🧩 preserve active selection
+            if (model.zones) this.zones = model.zones;
+            if (model.targets) this.targets = model.targets;
+
+            // Pull geometry state from model.transform if it changed
+            const t = model.transform;
+            if (t) {
+                this.origin = t.origin;
+                this.SCALE = t.scale;
+                this.theta = t.theta;
+                this.maxRange = t.maxRange;
+            }
+
+            // 🧠 restore zone highlight after redraw
+            if (prevActive && this.zones[prevActive]) {
+                this.ui.activeZoneId = prevActive;
+            }
+
+            this.draw();
+        });
+    }
+    waitForStableSize(callback) {
+        const el = this.canvas;
+        if (!el) return;
+        let lastW = 0, lastH = 0;
+        let frames = 0;
+
+        const check = () => {
+            const rect = el.getBoundingClientRect();
+            const w = Math.round(rect.width);
+            const h = Math.round(rect.height);
+            if (w === lastW && h === lastH && w > 0 && h > 0) {
+                frames++;
+            } else {
+                frames = 0;
+                lastW = w;
+                lastH = h;
+            }
+            // Require 3 consecutive identical measurements (~50–100 ms)
+            if (frames >= 3) {
+                callback();
+            } else {
+                requestAnimationFrame(check);
+            }
+        };
+        check();
+    }
+    isReady() {
+        if (!this._ready) return false;
+        if (!this.canvas || !this.ctx) return false;
+        if (!isFinite(this.SCALE) || this.SCALE <= 0) return false;
+        if (!isFinite(this.maxRange) || this.maxRange <= 0) return false;
+        return true;
+    }
+    _setupButtons() {
+        const h = this.canvas.clientHeight || 400;
+        const y = h - 50; // 50px from bottom
+        this._buttons = [
+            { id: 'add', label: 'Add Zone', x: 20, y, w: 100, h: 32, visible: true },
+            { id: 'edit', label: 'Edit', x: 140, y, w: 80, h: 32, visible: true },
+            { id: 'save', label: 'Save', x: 240, y, w: 80, h: 32, visible: false },
+            { id: 'discard', label: 'Discard', x: 340, y, w: 100, h: 32, visible: false },
+            { id: 'delete', label: 'Delete', x: 460, y, w: 100, h: 32, visible: false }
+        ];
+    }
+    installPointerHandlers() {
+        const el = this.canvas;
+        el.style.touchAction = "none"; // prevent browser gestures
+
+        el.addEventListener("pointerdown", this._onPointerDown.bind(this));
+        el.addEventListener("pointermove", this._onPointerMove.bind(this));
+        el.addEventListener("pointerup", this._onPointerUp.bind(this));
+        el.addEventListener("pointercancel", this._onPointerUp.bind(this));
+        el.addEventListener("lostpointercapture", this._onPointerUp.bind(this));
+    }
+    _handleUIButton(id) {
+        switch (id) {
+            case 'add':
+                this._addZone();
+                break;
+
+            case 'edit': {
+                const enteringEdit = this.ui.mode !== 'edit';
+                this.ui.mode = enteringEdit ? 'edit' : 'view';
+
+                if (enteringEdit) {
+                    this.card && (this.card._editMode = true);
+                } else {
+                    this.card && (this.card._editMode = false);
+                    this.model.isDirty = false;
+                    this.ui.activeZoneId = null;           // leaving edit clears selection
+                }
+
+                this._updateToolbarVisibility();
+                this.draw();
+                console.log(`[EditMode] ${enteringEdit ? 'Entered' : 'Exited'} edit mode`);
+                break;
+            }
+
+            case 'save': {
+                this.card?.saveZonesToHA?.();
+                this.ui.mode = 'view';
+                this.card && (this.card._editMode = false);
+                this.ui.activeZoneId = null;             // nothing selected after save
+                this._updateToolbarVisibility();         // hides delete, shows Edit, hides Save/Discard
+                this.draw();
+                break;
+            }
+
+            case 'discard': {
+                this.card?.loadZonesFromHA?.();
+                this.ui.mode = 'view';
+                this.card && (this.card._editMode = false);
+                this.ui.activeZoneId = null;             // clear selection
+                this._updateToolbarVisibility();
+                this.draw();
+                break;
+            }
+
+            case 'delete': {
+                if (this.ui.activeZoneId) {
+                    const zones = { ...this.model?.zones };
+                    delete zones[this.ui.activeZoneId];
+                    this.model?.updateZones(zones);
+                    this.ui.activeZoneId = null;           // no selection after delete
+                    this.model.isDirty = true;             // delete is an edit
+                }
+                this._updateToolbarVisibility();         // hides Delete button
+                this.draw();
+                break;
+            }
+        }
+    }
+
+    _addZone() {
+        const modelZones = this.model?.zones || {};
+        const nextId = this._findNextZoneId(modelZones, 4);
+        if (nextId === null) {
+            console.warn('[AddZone] Max zones reached (1..4).');
+            return;
+        }
+
+        const maxM = this.maxRange || 6;
+
+        // Default square: ~30% of range, centered
+        const size = this._clamp(maxM * 0.30, 0.2, Math.max(0.2, maxM)); // never tiny/neg
+        let cx = maxM * 0.5;
+        let cy = maxM * 0.5;
+
+        let x1 = this._clamp(cx - size / 2, 0, maxM - size);
+        let y1 = this._clamp(cy - size / 2, 0, maxM - size);
+        let x2 = this._clamp(x1 + size, 0, maxM);
+        let y2 = this._clamp(y1 + size, 0, maxM);
+
+        // Round to sane precision so the sidebar isn’t full of long floats
+        x1 = this._round3(x1); y1 = this._round3(y1);
+        x2 = this._round3(x2); y2 = this._round3(y2);
+
+        const zones = JSON.parse(JSON.stringify(modelZones));
+        zones[nextId] = this.clampZone({
+            id: nextId,
+            enabled: true,
+            occupied: false,
+            start: { x: x1, y: y1 },
+            end: { x: x2, y: y2 }
+        });
+
+        // Commit to model (single source of truth)
+        this.model?.updateZones?.(zones);
+
+
+        // Switch to edit mode and mark dirty so Save/Discard/Delete appear
+        this.ui.mode = 'edit';
+
+        if (this.card) {
+            this.card._editMode = true;
+            this._updateToolbarVisibility();
+            // show Save/Discard/Delete buttons in the toolbar
+            for (const b of this._buttons) {
+                if (['save', 'discard', 'delete'].includes(b.id))
+                    b.visible = true;
+            }
+        }
+        this.model.isDirty = true;
+        this.draw();
+    }
+
+
+    // Canvas px → room metres (inverse of roomToCanvas)
+    _canvasToRoom(px, py, params) {
+        const { room, scale } = params;
+        return { x: (px - room.x) / scale, y: (py - room.y) / scale };
+    }
+
+    // Get event position in canvas px
+    _getCanvasPoint(evt) {
+        const rect = this.canvas.getBoundingClientRect();
+        const x = (evt.clientX - rect.left);
+        const y = (evt.clientY - rect.top);
+        return { x, y };
+    }
+
+    // Normalize zone so start <= end
+    _normZone(z) {
+        const nx1 = Math.min(z.start.x, z.end.x);
+        const ny1 = Math.min(z.start.y, z.end.y);
+        const nx2 = Math.max(z.start.x, z.end.x);
+        const ny2 = Math.max(z.start.y, z.end.y);
+        return { start: { x: nx1, y: ny1 }, end: { x: nx2, y: ny2 }, enabled: z.enabled, occupied: z.occupied, executing: z.executing };
+    }
+
+    // Compute handle positions (in canvas px)
+    _computeHandlesForZone(z, params) {
+        const { room, scale } = params;
+        const toPx = (x, y) => ({ x: room.x + x * scale, y: room.y + y * scale });
+
+        const zN = this._normZone(z);
+        const x1 = zN.start.x, y1 = zN.start.y, x2 = zN.end.x, y2 = zN.end.y;
+        const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+
+        const pts = {
+            tl: toPx(x1, y1), tr: toPx(x2, y1), br: toPx(x2, y2), bl: toPx(x1, y2),
+            t: toPx(cx, y1), r: toPx(x2, cy), b: toPx(cx, y2), l: toPx(x1, cy),
+            c: toPx(cx, cy)
+        };
+
+        const r = 10 * (window.devicePixelRatio || 1); // hit radius
+        return [
+            { type: "corner", which: "tl", ...pts.tl, r },
+            { type: "corner", which: "tr", ...pts.tr, r },
+            { type: "corner", which: "br", ...pts.br, r },
+            { type: "corner", which: "bl", ...pts.bl, r },
+            { type: "edge", which: "t", ...pts.t, r },
+            { type: "edge", which: "r", ...pts.r, r },
+            { type: "edge", which: "b", ...pts.b, r },
+            { type: "edge", which: "l", ...pts.l, r },
+            { type: "move", which: "c", ...pts.c, r },
+        ];
+    }
+
+    _hitHandle(px, py, handles) {
+        for (const h of handles) {
+            const dx = px - h.x, dy = py - h.y;
+            if (dx * dx + dy * dy <= h.r * h.r) return h;
+        }
+        return null;
+    }
+
+    _pointInZone(px, py, z, params) {
+        const { room, scale } = params;
+        const zN = this._normZone(z);
+        const x1 = room.x + zN.start.x * scale;
+        const y1 = room.y + zN.start.y * scale;
+        const x2 = room.x + zN.end.x * scale;
+        const y2 = room.y + zN.end.y * scale;
+        return px >= x1 && px <= x2 && py >= y1 && py <= y2;
+    }
+    // Smallest free ID in 1..4 (change 4 if you support more)
+    _findNextZoneId(zones, maxId = 4) {
+        const used = new Set(
+            Object.entries(zones)
+                .filter(([_, z]) =>
+                    z && z.enabled && z.start && z.end &&
+                    (z.start.x !== z.end.x || z.start.y !== z.end.y)
+                )
+                .map(([k]) => Number(k))
+        );
+        for (let i = 1; i <= maxId; i++) if (!used.has(i)) return i;
+        return null;
+    }
+
+    _round3(v) { return Math.round(v * 1000) / 1000; }
+
+    _clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    _updateToolbarVisibility() {
+        if (!this._buttons) return;
+
+        const inEdit = this.ui.mode === 'edit';
+        const hasZone = !!this.ui.activeZoneId;
+
+        for (const b of this._buttons) {
+            switch (b.id) {
+                case 'edit':
+                    b.visible = !inEdit;               // hide Edit while editing
+                    break;
+                case 'save':
+                case 'discard':
+                    b.visible = inEdit;                // show when editing
+                    break;
+                case 'delete':
+                    b.visible = inEdit && hasZone;     // only when a zone is selected
+                    break;
+                default:
+                    // leave others as-is
+                    break;
+            }
+        }
+    }
+
+    updateScaleGeometry() {
+        // === 1. Measure canvas ===
+        const w = this.canvas.clientWidth;
+        const h = this.canvas.clientHeight;
+        const margin = Math.min(w, h) * 0.05;  // 5% padding all around
+        const roomSize = Math.min(w, h) - margin * 2;
+
+        // === 2. Scale derivation ===
+        this.SCALE = roomSize / this.maxRange;   // uniform metres→pixels
+        // (Optionally later we can add SCALE_X/Y for anisotropic control)
+
+        // === 3. Origin placement ===
+        this.origin = { x: w / 2, y: margin };   // top-centre radar mount
+
+        // === 4. Store geometry snapshot for downstream functions ===
+        this._geometry = {
+            canvas: { w, h },
+            margin,
+            roomSize,
+            origin: this.origin,
+            scale: this.SCALE,
+            theta: this.theta,
+            range: this.maxRange
+        };
+    }
+    setContext({ hass, deviceId }) {
+        this._hass = hass;
+        this._selectedDevice = deviceId;
+
+        // Try to fetch live parameters from HA
+        const distEntity = hass?.states?.[`number.${deviceId}_distance`];
+        const dirEntity = hass?.states?.[`number.${deviceId}_installation_angle`];
+
+        if (distEntity) this.maxMeters = Number(distEntity.state);
+        if (dirEntity) this.theta = Number(dirEntity.state) * Math.PI / 180;
+
+        // Now we have real data → ready to draw
+        this._ready = true;
+        if (this._parentCard.debugger) {
+            console.info(`[RadarCanvas] Context ready — device=${deviceId}, maxMeters=${this.maxMeters}, theta=${(this.theta * 180 / Math.PI).toFixed(1)}°`);
+        }
+        this.draw();
+    }
+    computeGeometry() {
+        const w = this.canvas.clientWidth;
+        const h = this.canvas.clientHeight;
+
+        // ✅ keep consistent 5% margin with updateScaleGeometry()
+        const margin = Math.min(w, h) * 0.05;
+        const L = Math.min(w, h) - margin * 2;
+        const offsetX = (w - L) / 2;
+        const offsetY = (h - L) / 2;
+
+        // world room box (same logic as updateScaleGeometry)
+        const room = { x: offsetX, y: offsetY, size: L };
+
+        // clamp θ to [-π/4, +π/4]
+        const theta = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, this.theta));
+
+        // === linear slide: θ = 0 → centre, θ = ±π/4 → ±L/2 (edges)
+        const slide = (theta / (Math.PI / 4)) * (L / 2);
+
+        // top-centre origin + horizontal slide
+        const origin = { x: offsetX + L / 2 + slide, y: offsetY + margin };
+
+        // uniform scale in metres → pixels
+        const scale = L / this.maxRange;
+
+        // Keep instance state consistent with what we return
+        this.origin = origin;
+        this.SCALE = scale;
+        this._currentTheta = theta;
+        return {
+            canvas: { w, h },
+            room,
+            origin,
+            scale,
+            theta,
+            range: this.maxRange,
+            zones: this.zones || {},
+            targets: this.targets || {},
+            // in computeGeometry() return value
+            handles: {
+
+                angle: {
+                    x: origin.x,
+                    y: offsetY + 25
+                },
+                range: {
+                    x: offsetX + L - 25,
+                    y: offsetY + L / 2
+                }
+            },
+            toCanvas: (x, y) => this.worldToCanvas(x, y),
+            toWorld: (px, py) => this.canvasToWorld(px, py)
+        };
+    }
+
+    drawControls(ctx, params) {
+        if (this.ui.mode !== 'edit') return;
+        const { handles } = params;
+        ctx.save();
+
+        ctx.fillStyle = 'rgba(255,165,0,0.9)';
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.lineWidth = 1.5;
+
+        const r = 8;
+
+        // Angle handle
+        ctx.beginPath();
+        ctx.arc(handles.angle.x, handles.angle.y, r, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+
+        // Range handle
+        ctx.beginPath();
+        ctx.arc(handles.range.x, handles.range.y, r, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.restore();
+    }
+
+    drawRoomBox(ctx, params) {
+        const { x, y, size } = params.room;
+        ctx.save();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'black';
+        ctx.strokeRect(x, y, size, size);
+        ctx.fillStyle = 'orange';
+        ctx.beginPath();
+        ctx.arc(params.origin.x, params.origin.y, 4, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.restore();
+    }
+
+
+    drawFan(ctx, params) {
+        const { range, toCanvas } = params;
+        const steps = 96;
+        const half = Math.PI / 4; // ±45°
+
+        const p0 = toCanvas(0, 0);
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+
+        // Local radar frame: forward = -Y (down)
+        for (let i = 0; i <= steps; i++) {
+            const phi = -half + (i / steps) * (2 * half);
+            const wx = Math.sin(phi) * range;   // left/right
+            const wy = -Math.cos(phi) * range;  // forward (down)
+            const p = toCanvas(wx, wy);
+            ctx.lineTo(p.x, p.y);
+        }
+        ctx.closePath();
+
+        ctx.fillStyle = 'rgba(13,110,253,0.20)';
+        ctx.strokeStyle = 'rgba(13,110,253,0.60)';
+        ctx.lineWidth = 2;
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    drawZones(ctx, params) {
+        function roomToCanvas(x_m, y_m, params) {
+            const { room, scale } = params;  // scale = px per metre
+            return {
+                x: room.x + x_m * scale,
+                y: room.y + y_m * scale
+            };
+        }
+        const { zones, room, scale } = params;
+        if (!zones) return;
+
+        ctx.save();
+        ctx.font = '12px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        for (const [id, z] of Object.entries(zones)) {
+            if (!z.enabled) continue;
+
+            // === Convert room-space metres → canvas px ===
+            const p1 = roomToCanvas(z.start.x, z.start.y, params);
+            const p2 = roomToCanvas(z.end.x, z.end.y, params);
+
+            const x = Math.min(p1.x, p2.x);
+            const y = Math.min(p1.y, p2.y);
+            const w = Math.abs(p1.x - p2.x);
+            const h = Math.abs(p1.y - p2.y);
+
+            // === Draw zone rectangle ===
+            ctx.fillStyle = z.occupied
+                ? 'rgba(0,255,0,0.25)'  // active → green
+                : 'rgba(255,0,0,0.10)'; // idle → faint red
+            ctx.strokeStyle = z.occupied
+                ? 'rgba(0,255,0,0.6)'
+                : 'rgba(255,0,0,0.4)';
+            ctx.lineWidth = 1.5;
+
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeRect(x, y, w, h);
+
+            // === Label ===
+            ctx.fillStyle = 'black';
+            ctx.fillText(`Z${id}`, x + w / 2, y + h / 2);
+            /*
+            // === Optional: handles for edit mode ===
+            if (params.editMode) {
+                ctx.fillStyle = 'orange';
+                const handleSize = 6;
+                ctx.beginPath();
+                ctx.arc(p1.x, p1.y, handleSize, 0, 2 * Math.PI);
+                ctx.arc(p2.x, p2.y, handleSize, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+                */
+            // after drawing each zone rect...
+            if (this.ui.mode === "edit" && this.ui.activeZoneId === id) {
+                const hs = this._computeHandlesForZone(z, params);
+                for (const h of hs) {
+                    ctx.beginPath();
+                    if (h.type === "move") {
+                        ctx.fillStyle = "rgba(255,165,0,0.7)"; // orange center
+                        ctx.arc(h.x, h.y, 6, 0, 2 * Math.PI);
+                        ctx.fill();
+                    } else {
+                        ctx.fillStyle = h.type === "corner" ? "#ffa500" : "#ffd166";
+                        ctx.arc(h.x, h.y, 5, 0, 2 * Math.PI);
+                        ctx.fill();
+                    }
+                }
+                // Highlight selected zone border
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = "#0d6efd";
+                ctx.strokeRect(
+                    Math.min(p1.x, p2.x), Math.min(p1.y, p2.y),
+                    Math.abs(p1.x - p2.x), Math.abs(p1.y - p2.y)
+                );
+            }
+        }
+
+
+        ctx.restore();
+    }
+
+    drawTargets(ctx, params) {
+        function radarToCanvas(x_m, y_m, params) {
+            // Forward (front of radar) is +Y in human terms → -Y in transform
+            return params.toCanvas(x_m, -y_m);
+        }
+        const { targets, toCanvas } = params;
+        if (!targets) return;
+
+        ctx.save();
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+
+        for (const [id, t] of Object.entries(targets)) {
+            if (!t) continue;
+
+            // Expect target.x/y in metres relative to radar (fan) origin
+            const { x, y, intensity = 1.0 } = t;
+            const p = radarToCanvas(t.x, t.y, params);   // ⬅ same call the fan uses
+
+            const r = 5;
+            const alpha = Math.min(Math.max(intensity, 0.2), 1);
+            const color = `rgba(200,10,10,${0.5 * alpha})`;
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, r, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = `rgba(13,110,253,${0.8 * alpha})`;
+            ctx.stroke();
+
+            ctx.fillStyle = 'black';
+            ctx.fillText(`T${id}`, p.x + r + 2, p.y);
+        }
+
+        ctx.restore();
+
+    }
+    draw_debug_lines(ctx) {
+        // === DEBUG: reference direction lines ===
+        if (!isFinite(this._currentTheta)) {
+            console.warn('[RadarCanvas] debug_lines: theta invalid');
+            return;
+        }
+        ctx.save();
+
+        // canvas centre for all references
+        const cx = this.origin.x;
+        const cy = this.origin.y;
+        const radius = this.maxMeters * this.SCALE * 1.1; // extend slightly beyond fan
+
+        // 1️⃣ Fan coordinate (uses local ctx.rotate)
+        //ctx.save();
+        ctx.strokeStyle = 'rgba(0, 128, 255, 0.6)';  // blue
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+
+        ctx.lineTo(
+            cx + Math.cos(this.theta + Math.PI * 1.5) * radius,
+            cy + Math.sin(this.theta + Math.PI * 1.5) * radius
+        );
+        ctx.stroke();
+
+        // 2️⃣ Zone/target coordinate (uses worldToCanvas math)
+        const tip = this.worldToCanvas(0, this.maxMeters);
+        ctx.strokeStyle = 'rgba(255,0,0,0.6)';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(tip.x, tip.y);
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = 'black';
+        ctx.font = '12px monospace';
+        ctx.fillText(
+            `${(this.theta * 180 / Math.PI).toFixed(1)}° / ${((this.theta + Math.PI / 2) * 180 / Math.PI).toFixed(1)}°`,
+            this.origin.x + 20,
+            this.origin.y - 10
+        );
+
+    }
+
     update(zones = {}, targets = {}) {
         this.zones = zones || {};
         this.targets = targets || {};
@@ -29,53 +700,52 @@ export class RadarCanvas {
         this.targets = targets || {};
     }
 
-    
-   
+
+
 
     // Prevent any zone from going "behind" the radar
-    clampZone(z) {
-        if (!z.start || !z.end) return z;
+    // --- helpers: clamp a single coordinate into 0..10 m ---
+    clampScalar(v) {
+        return Math.min(Math.max(v, 0), 10);
+    }
 
-        // 1️⃣ Restrict Y ≥ 0 (no “behind” the radar)
-        z.start.y = Math.max(0, z.start.y);
-        z.end.y   = Math.max(0, z.end.y);
-
-        // 2️⃣ Restrict radial distance ≤ maxRange
-        const r1 = Math.hypot(z.start.x, z.start.y);
-        const r2 = Math.hypot(z.end.x,   z.end.y);
-        const scale1 = r1 > this.maxRange ? this.maxRange / r1 : 1;
-        const scale2 = r2 > this.maxRange ? this.maxRange / r2 : 1;
-        if (scale1 < 1) { z.start.x *= scale1; z.start.y *= scale1; }
-        if (scale2 < 1) { z.end.x   *= scale2; z.end.y   *= scale2; }
-
-        // 3️⃣ Restrict angular position within the fan (±fanAngle/2)
-        const fanAngle = Math.PI / 2; // same as draw()
-        const limitAngle = fanAngle / 2;
-        const limitPoint = (p) => {
-            const angle = Math.atan2(p.x, p.y);  // radar "forward" along +Y
-            if (angle > limitAngle) {
-            const a = limitAngle;
-            const r = Math.hypot(p.x, p.y);
-            p.x = r * Math.sin(a);
-            p.y = r * Math.cos(a);
-            } else if (angle < -limitAngle) {
-            const a = -limitAngle;
-            const r = Math.hypot(p.x, p.y);
-            p.x = r * Math.sin(a);
-            p.y = r * Math.cos(a);
-            }
+    // --- clamp a point in room-space metres ---
+    clampPoint(p) {
+        if (!p) return { x: 0, y: 0 };
+        return {
+            x: this.clampScalar(p.x),
+            y: this.clampScalar(p.y),
         };
-        limitPoint(z.start);
-        limitPoint(z.end);
+    }
 
-        // 4️⃣ Minimum height (still keep your 0.05 m logic)
-        const minH = 0.05;
-        if (z.end.y - z.start.y < minH) z.end.y = z.start.y + minH;
+    // --- clamp a zone in room-space metres ---
+    clampZone(z) {
+        if (!z || !z.start || !z.end) return z;
 
-        return z;
-        }
+        let s = this.clampPoint(z.start);
+        let e = this.clampPoint(z.end);
 
-    
+        // normalise so start <= end
+        let x1 = Math.min(s.x, e.x);
+        let y1 = Math.min(s.y, e.y);
+        let x2 = Math.max(s.x, e.x);
+        let y2 = Math.max(s.y, e.y);
+
+        // minimum size (e.g. 0.05m so it never collapses)
+        const min = 0.05;
+        if (x2 - x1 < min) x2 = this.clampScalar(x1 + min);
+        if (y2 - y1 < min) y2 = this.clampScalar(y1 + min);
+
+        return {
+            ...z,
+            start: { x: x1, y: y1 },
+            end: { x: x2, y: y2 },
+        };
+    }
+
+
+
+
     // rotate a point (x, y) by the current installation angle
     rotatePoint(x, y) {
         // theta is saved each frame inside draw()
@@ -89,67 +759,49 @@ export class RadarCanvas {
             y: x * sinT + y * cosT
         };
     }
+    /*
+    rx = x cosT - y sinT   → clockwise
+    ry = x sinT + y cosT   → clockwise
+    rx = x cosT + y sinT   → anticlockwise
+    ry = -x sinT + y cosT  → anticlockwise
+    */
 
-    // radar-relative (meters) → canvas pixels
     worldToCanvas(x, y) {
-        const cosT = Math.cos(this.theta);
-        const sinT = Math.sin(this.theta);
-        const rx =  x * cosT - y * sinT;
-        const ry =  x * sinT + y * cosT;
+        const t = this.theta;   // align world +Y with fan’s +X-based drawing
+        //const t = this.theta - Math.PI / 2;  // align to fan’s rotation (theta + π/2)
+        const cosT = Math.cos(t);
+        const sinT = Math.sin(t);
+
+        const rx = x * cosT + y * sinT;
+        const ry = -x * sinT + y * cosT;
+        //console.log('[worldToCanvas] SCALE=', this.SCALE);
         return {
             x: this.origin.x + rx * this.SCALE,
-            y: this.origin.y - ry * this.SCALE   // 🧭 flip Y back for screen draw
+            y: this.origin.y - ry * this.SCALE   // only flip Y once, here
         };
-        }
+    }
 
-    // canvas pixels → radar-relative (meters)
+    // canvas (px) -> world (metres)
     canvasToWorld(px, py) {
-    // Move click into radar-local coordinates
-    const relX = px - this.origin.x;
-    const relY = this.origin.y - py;   // 🧭 invert Y to make upward positive
+        const relX = px - this.origin.x;
+        const relY = this.origin.y - py;
+        const t = this.theta;
+        //const t = this.theta - Math.PI / 2;  // same alignment used above
+        const cosT = Math.cos(-t);
+        const sinT = Math.sin(-t);
+        const invScale = 1 / this.SCALE;
 
-    // Undo rotation and scale
-    const cosT = Math.cos(-this.theta);  // flip rotation sense
-    const sinT = Math.sin(-this.theta);
-    const x = ( relX * cosT - relY * sinT ) / this.SCALE;
-    const y = ( relX * sinT + relY * cosT ) / this.SCALE;
-
-    console.log(`[CTW] px=${px.toFixed(1)}, py=${py.toFixed(1)} → world=(${x.toFixed(2)},${y.toFixed(2)}) θ=${(this.theta*180/Math.PI).toFixed(1)}°`);
-    return { x, y };
+        const x = (relX * cosT + relY * sinT) * invScale;
+        const y = (-relX * sinT + relY * cosT) * invScale;
+        console.log('[canvasToWorld] SCALE=', this.SCALE);
+        return { x, y };
     }
 
-    drawZones(ctx) {
-        for (const [, z] of Object.entries(this.zones || {})) {
-        if (!z.enabled) continue;
-        ctx.fillStyle = z.occupied
-            ? 'rgba(255, 80, 80, 0.25)'
-            : 'rgba(80, 255, 80, 0.1)';
-        ctx.beginPath();
-        ctx.arc(
-            this.origin.x + z.x * this.SCALE,
-            this.origin.y + z.y * this.SCALE,
-            10,
-            0,
-            2 * Math.PI
-        );
-        ctx.fill();
-        }
-    }
 
-    drawTargets(ctx) {
-        for (const [, t] of Object.entries(this.targets || {})) {
-        ctx.fillStyle = '#2196f3';
-        ctx.beginPath();
-        ctx.arc(
-            this.origin.x + t.x * this.SCALE,
-            this.origin.y + t.y * this.SCALE,
-            4,
-            0,
-            2 * Math.PI
-        );
-        ctx.fill();
-        }
-    }
+
+
+
+
     clear() {
         const ratio = window.devicePixelRatio || 1;
         // clear the full backing buffer
@@ -160,210 +812,54 @@ export class RadarCanvas {
     }
 
     draw() {
+        if (!this.isReady()) {
+            console.warn('[RadarCanvas] draw() skipped — data not ready.');
+            return;
+        }
+
         const ctx = this.ctx;
         this.clear();
+        try {
+            //console.log("DRAW CALL", performance.now().toFixed(1),
+            //    "zones=", Object.keys(this.model?.zones || {}).length,
+            //    "caller:", (new Error()).stack.split("\n")[2]);
 
-        // === Canvas geometry ===
-        const w = this._width  ?? this.canvas.clientWidth;
-        const h = this._height ?? this.canvas.clientHeight;
+            //this.updateScaleGeometry();
+            const params = this.computeGeometry();
+            // === Core geometry setup (inside draw) ===
 
-        // === 1. Read installation angle directly from HA ===
-        const dirEntity = this._hass?.states?.[`number.${this._selectedDevice}_installation_angle`];
-        const directionDeg = Number(dirEntity?.state || 0);
-        const theta = directionDeg * Math.PI / 180;
-        this.theta = theta + Math.PI / 2;   // align coordinate math with fan rotation
+            // draw UI layer first
+            this._drawToolbar(ctx);
+            this.drawControls(ctx, params);
 
-        // === 2. Get distance from HA (clamped 1–8 m) ===
-        const distEntity = this._hass?.states?.[`number.${this._selectedDevice}_distance`];
-        let distMeters = Number(distEntity?.state || 6);
-        distMeters = Math.max(1, Math.min(distMeters, 8));
-        this.maxMeters = distMeters;
+            // then draw the world
+            this.drawRoomBox(ctx, params);
+            this.drawFan(ctx, params);
 
-        // === 3. Compute dynamic scale (so full range fits canvas width nicely) ===
-        this.SCALE = (w * 0.45) / this.maxMeters;
-        const rangePx = this.maxMeters * this.SCALE;
+            this.drawZones(ctx, params);
+            this.drawTargets(ctx, params);
 
-        // === 4. Compute origin & centering based on installation angle ===
-        const maxOffset = w * 0.65;
-        const ratio = Math.sin(theta);
-        const topMargin = Math.max(5, h * 0.02);
-        this.origin = { x: w / 2 + ratio * maxOffset, y: topMargin };
 
-        this._currentTheta = theta;
-        this._currentRange = rangePx;
-
-        // === Theme colours from HA ===
-        const root = document.documentElement;
-        const themePrimary = getComputedStyle(root).getPropertyValue('--primary-color') || '#0d6efd';
-        const themeText = getComputedStyle(root).getPropertyValue('--primary-text-color') || '#111';
-        const themeBg = getComputedStyle(root).getPropertyValue('--card-background-color') || '#fafafa';
-
-        // === Subtle grid backdrop ===
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0,0,0,0.05)';
-        ctx.lineWidth = 1;
-        for (let gx = 0; gx <= w; gx += w / 10) {
-            ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
+        } catch (err) {
+            console.groupCollapsed('%c[RadarCanvas] draw() error', 'color:red;font-weight:bold;');
+            console.error(err);
+            console.table({
+                origin: this.origin,
+                scale: this.SCALE,
+                theta: this.theta,
+                zones: this.zones ? Object.keys(this.zones).length : 0,
+                targets: this.targets ? Object.keys(this.targets).length : 0
+            });
+            console.groupEnd();
         }
-        for (let gy = 0; gy <= h; gy += h / 10) {
-            ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke();
-        }
-        ctx.restore();
+    }
 
-        // === Forward-facing detection fan ===
-        ctx.save();
 
-        ctx.translate(this.origin.x, this.origin.y);
-        //console.log(`[Origin check] origin=(${this.origin.x.toFixed(1)}, ${this.origin.y.toFixed(1)})  canvas=(${this.canvas.width},${this.canvas.height})  SCALE=${this.SCALE.toFixed(2)}`);
-
-        ctx.rotate(theta + Math.PI / 2);
-
-        const fanAngle = Math.PI / 2; // ±45° FOV
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.arc(0, 0, rangePx, -fanAngle / 2, fanAngle / 2);
-        ctx.closePath();
-
-        const fanFill = themePrimary + '22'; // translucent
-        const fanStroke = themePrimary + '80';
-        ctx.fillStyle = fanFill;
-        ctx.strokeStyle = fanStroke;
-        ctx.lineWidth = 2;
-        ctx.fill();
-        ctx.stroke();
-
-        // === Calibration rings ===
-        const fanSweep = Math.PI / 4;
-        for (let r = 1; r <= this.maxMeters; r++) {
-            ctx.beginPath();
-            ctx.setLineDash(r % 2 === 0 ? [5, 5] : []);
-            ctx.strokeStyle = r === Math.round(this.maxMeters)
-            ? 'rgba(0,0,0,0.65)'
-            : 'rgba(0,0,0,0.25)';
-            ctx.lineWidth = r === Math.round(this.maxMeters) ? 2 : 1;
-            ctx.arc(0, 0, r * this.SCALE, -fanSweep, fanSweep);
-            ctx.stroke();
-
-            ctx.setLineDash([]);
-            ctx.fillStyle = themeText;
-            ctx.font = '10px monospace';
-            ctx.fillText(`${r} m`, r * this.SCALE + 6, 0);
-        }
-        ctx.restore();
-
-        // === Sensor origin marker ===
-        ctx.fillStyle = '#ff9900';
-        ctx.beginPath();
-        ctx.arc(this.origin.x, this.origin.y, 4, 0, 2 * Math.PI);
-        ctx.fill();
-
-        // === Zones ===
-        // // Clamp all zones before rendering
-        // Clamp all zones before rendering
-       
-        for (const z of Object.values(this.zones)) this.clampZone(z);
-
-        // === Zones ===
-        ctx.save();
-
-        
-        const drawHandle = (x, y, color) => {
-            const r = 6;
-            ctx.beginPath();
-            ctx.arc(x, y, r, 0, 2 * Math.PI);
-            ctx.fillStyle = '#fff';
-            ctx.fill();
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = color;
-            ctx.stroke();
-        };
-        for (const [num, z] of Object.entries(this.zones || {})) {
-            if (!z.start || !z.end || !z.enabled) continue;
-
-            const p1 = this.worldToCanvas(z.start.x, z.start.y);
-            const p2 = this.worldToCanvas(z.end.x, z.end.y);
-            const width  = p2.x - p1.x;
-            const height = p2.y - p1.y;
-
-            // Gradient shading
-            const grad = ctx.createLinearGradient(p1.x, p1.y, p2.x, p2.y);
-            if (z.occupied) {
-            grad.addColorStop(0, 'rgba(255,80,80,0.35)');
-            grad.addColorStop(1, 'rgba(255,255,255,0.05)');
-            } else {
-            grad.addColorStop(0, themePrimary + '40');
-            grad.addColorStop(1, themeBg + '10');
-            }
-            ctx.fillStyle = grad;
-            ctx.fillRect(p1.x, p1.y, width, height);
-
-            // Zone outline
-            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(p1.x, p1.y, width, height);
-
-            // === Handles in edit mode ===
-            if (this._parentCard?._editMode) {
-            // Debug crosshair for each handle (in bright magenta)
-            ctx.save();
-            ctx.strokeStyle = 'magenta';
-            ctx.lineWidth = 2;
-            for (const [zoneNum, z] of Object.entries(this.zones)) {
-                for (const corner of ['start', 'end']) {
-                    if (!z[corner]) continue;
-                    const c = this.worldToCanvas(z[corner].x, z[corner].y);
-                    ctx.beginPath();
-                    ctx.arc(c.x, c.y, 10, 0, Math.PI * 2);
-                    ctx.stroke();
-                    ctx.font = '12px sans-serif';
-                    ctx.fillStyle = 'magenta';
-                    ctx.fillText(`Z${zoneNum}-${corner}`, c.x + 12, c.y);
-                }
-            }
-            ctx.restore();
-            drawHandle(p1.x, p1.y, 'lime');
-            drawHandle(p2.x, p2.y, 'orange');
-            }
-
-            // Highlight selected
-            if (this._highlightZone && Number(num) === Number(this._highlightZone)) {
-            ctx.strokeStyle = 'rgba(255,215,0,0.9)';
-            ctx.lineWidth = 3;
-            ctx.strokeRect(p1.x, p1.y, width, height);
-            }
-
-            // Zone label
-            ctx.fillStyle = themeText;
-            ctx.font = '14px sans-serif';
-            ctx.fillText(`Z${num}`, p1.x + 6, p1.y + 18);
-        }
-        ctx.restore(); // restore default transform for targets and labels
-        // === Targets ===
-        for (const [num, t] of Object.entries(this.targets || {})) {
-            if (t.x === undefined || t.y === undefined) continue;
-            const p = this.worldToCanvas(t.x, t.y);
-            ctx.fillStyle = 'rgba(220,53,69,0.9)';
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
-            ctx.fill();
-            ctx.fillStyle = themeText;
-            ctx.font = '12px sans-serif';
-            ctx.fillText(`T${num}`, p.x + 8, p.y);
-        }
-
-        // === Origin glow accent ===
-        ctx.beginPath();
-        ctx.arc(this.origin.x, this.origin.y, 5, 0, 2 * Math.PI);
-        ctx.fillStyle = 'lime';
-        ctx.fill();
-        }
-
-  
     updateScale(rect) {
         this.SCALE = rect.width / 3.2; // adaptive scaling
     }
 
-    
+
 
     setConfig({ theta, maxRange, zones, targets }) {
 
@@ -373,13 +869,13 @@ export class RadarCanvas {
         if (targets) this.targets = targets;
         this.draw();
     }
-    
+
     resize() {
         const rect = this.canvas.getBoundingClientRect();
         const ratio = window.devicePixelRatio || 1;
 
         // Physical pixels for crispness
-        this.canvas.width  = Math.max(1, Math.floor(rect.width  * ratio));
+        this.canvas.width = Math.max(1, Math.floor(rect.width * ratio));
         this.canvas.height = Math.max(1, Math.floor(rect.height * ratio));
 
         // Reset transform, then apply DPR scale
@@ -387,14 +883,381 @@ export class RadarCanvas {
         this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
 
         // Store *logical* size for layout math
-        this._width  = rect.width;
+        this._width = rect.width;
         this._height = rect.height;
 
-        this.updateScale(rect);
+        this.updateScaleGeometry();  // new geometry precomputation
+        this._setupButtons();
+        this._sizeValid = true
         this.draw();
     }
     highlightZone(zoneNum) {
         this._highlightZone = zoneNum;
         this.draw();
     }
+    _drawToolbar(ctx) {
+        if (!this._buttons) return;
+        ctx.save();
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        for (const btn of this._buttons) {
+            if (!btn.visible) continue;
+
+            let fill = 'rgba(13,110,253,0.15)';
+            let stroke = 'rgba(13,110,253,0.7)';
+
+            // Active highlight for edit mode
+            if (btn.id === 'edit' && this.ui.mode === 'edit')
+                fill = 'rgba(13,110,253,0.35)';
+
+            ctx.fillStyle = fill;
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = 2;
+            ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 6);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = 'black';
+            ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+        }
+
+        ctx.restore();
+    }
+
+
+    _onPointerDown(evt) {
+        if (this.ui.pointerId !== null) return;
+        const p = this._getCanvasPoint(evt);
+
+        // 1) Toolbar buttons always work
+        for (const btn of this._buttons) {
+            if (btn.visible &&
+                p.x >= btn.x && p.x <= btn.x + btn.w &&
+                p.y >= btn.y && p.y <= btn.y + btn.h) {
+                this._handleUIButton(btn.id);
+                evt.preventDefault(); evt.stopPropagation();
+                return;
+            }
+        }
+
+        // 2) If not editing, stop here (no zone grabs)
+        if (this.ui.mode !== 'edit') return;
+
+        // 3) Angle / Range handles (only in edit mode)
+        const params = this.computeGeometry();
+        const { handles } = params;
+        const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        if (d(p, handles.angle) < 12) {
+            this.ui.pointerId = evt.pointerId;
+            this.ui.activeHandle = 'angle';
+            this.canvas.setPointerCapture(evt.pointerId);
+            return;
+        }
+        if (d(p, handles.range) < 12) {
+            this.ui.pointerId = evt.pointerId;
+            this.ui.activeHandle = 'range';
+            this.canvas.setPointerCapture(evt.pointerId);
+            return;
+        }
+
+        // 4) Zone hit-test (edit mode only)
+        const { x: px, y: py } = p;
+        let hitZoneId = null, hitHandle = null;
+        for (const [id, z] of Object.entries(params.zones || {})) {
+            const hs = this._computeHandlesForZone(z, params);
+            const h = this._hitHandle(px, py, hs);
+            if (h) { hitZoneId = id; hitHandle = h; break; }
+            if (!hitZoneId && this._pointInZone(px, py, z, params)) hitZoneId = id;
+
+
+
+        }
+        if (!hitZoneId) return;
+
+        // Capture zone and start drag or selection
+        console.log("Before capture", evt.pointerId);
+        this.canvas.setPointerCapture(evt.pointerId);
+        console.log("After capture (should persist next frame)");
+        this.ui.pointerId = evt.pointerId;
+        this.ui.activeZoneId = hitZoneId;
+        this._updateToolbarVisibility();
+        this.ui.activeHandle = hitHandle || { type: "move", which: "c" };
+        this.ui.dragStart = {
+            canvas: { x: px, y: py },
+            room: this._canvasToRoom(px, py, params)
+        };
+        if (this.ui.activeZoneId && this.ui.mode === 'edit') {
+            const delBtn = this._buttons.find(b => b.id === 'delete');
+            if (delBtn) delBtn.visible = true;
+        }
+
+        // ✅ Defer deep-copy setup to next animation frame to avoid race
+        requestAnimationFrame(() => {
+            this.ui.pointerId = evt.pointerId;
+            this.ui.activeZoneId = hitZoneId;
+            this.ui.activeHandle = hitHandle || { type: "move", which: "c" };
+            this.ui.dragStart = {
+                canvas: { x: px, y: py },
+                room: this._canvasToRoom(px, py, params)
+            };
+            const z0 = params.zones[hitZoneId];
+            this.ui.originalZone = JSON.parse(JSON.stringify(this._normZone(z0)));
+
+            if (this.card) this.card._editMode = true;
+            this.model.isDirty = true;
+            this.draw();
+
+            console.log(`[ZoneSelect] Active zone ${hitZoneId} locked and drawn.`);
+        });
+        evt.preventDefault();
+    }
+
+    _onPointerMove(evt) {
+        if (this.ui.pointerId !== evt.pointerId) return;
+
+        // === 1️⃣ Handle ANGLE and RANGE drag immediately (before other checks)
+        if (this.ui.activeHandle === 'angle') {
+            const delta = evt.movementX;
+            const dTheta = delta / 200;
+            this.theta = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, this.theta + dTheta));
+
+            // ✅ silent update: don’t trigger model.onChange yet
+            this.model?.updateRadarPose?.({
+                angleDeg: this.theta * 180 / Math.PI,
+                rangeM: this.maxRange,
+                silent: true
+            });
+
+            this.draw();
+            evt.preventDefault();
+            return;
+        }
+
+        if (this.ui.activeHandle === 'range') {
+            const delta = -evt.movementY;
+            const dRange = delta / 50;
+            this.maxRange = Math.max(1, Math.min(8, this.maxRange + dRange));
+            /*
+            this.model?.updateRadarPose?.({
+                angleDeg: this.theta * 180 / Math.PI,
+                rangeM: this.maxRange,
+                silent: true
+            });*/
+            this.model?.updateRadarPose?.({
+                angleDeg: this.theta * 180 / Math.PI,
+                rangeM: this.maxRange,
+                silent: true
+            });
+
+            this.draw();
+            evt.preventDefault();
+            return;
+        }
+
+        // === 2️⃣ Normal zone dragging only valid in edit mode
+        if (this.ui.mode !== 'edit') return;
+
+        console.log('MOVE', evt.pointerId);
+
+        const params = this.computeGeometry();
+        const { x: px, y: py } = this._getCanvasPoint(evt);
+        const curRoom = this._canvasToRoom(px, py, params);
+        const { activeZoneId, activeHandle, originalZone, dragStart } = this.ui;
+        if (!activeZoneId || !activeHandle) return;
+
+        const dz = JSON.parse(JSON.stringify(originalZone));
+        const dx = curRoom.x - dragStart.room.x;
+        const dy = curRoom.y - dragStart.room.y;
+
+        // === 3️⃣ Apply edit by handle type
+        if (activeHandle.type === "move") {
+            dz.start.x += dx; dz.end.x += dx;
+            dz.start.y += dy; dz.end.y += dy;
+        } else if (activeHandle.type === "corner") {
+            if (activeHandle.which.includes("t")) dz.start.y += dy;
+            if (activeHandle.which.includes("b")) dz.end.y += dy;
+            if (activeHandle.which.includes("l")) dz.start.x += dx;
+            if (activeHandle.which.includes("r")) dz.end.x += dx;
+        } else if (activeHandle.type === "edge") {
+            if (activeHandle.which === "t") dz.start.y += dy;
+            if (activeHandle.which === "b") dz.end.y += dy;
+            if (activeHandle.which === "l") dz.start.x += dx;
+            if (activeHandle.which === "r") dz.end.x += dx;
+        }
+
+        // === 4️⃣ Clamp to room bounds
+        const clamped = this.clampZone(dz);
+
+        // === 5️⃣ Commit zone change to model
+        const zones = { ...(params.zones || {}) };
+        zones[activeZoneId] = this._normZone(clamped);
+        if (this.model && typeof this.model.updateZones === 'function') {
+            this.model.updateZones(zones);
+        } else {
+            this.zones = zones;
+        }
+
+        // === 6️⃣ Smooth redraw
+        if (!this._redrawPending) {
+            this._redrawPending = true;
+            requestAnimationFrame(() => {
+                this.update(this.model?.zones || this.zones, this.targets);
+                this._redrawPending = false;
+            });
+        }
+
+        // === 7️⃣ Update hover feedback for toolbar
+        const p = this._getCanvasPoint(evt);
+        this._uiFeedback.hoverId = null;
+        for (const btn of this._buttons) {
+            if (p.x >= btn.x && p.x <= btn.x + btn.w &&
+                p.y >= btn.y && p.y <= btn.y + btn.h) {
+                this._uiFeedback.hoverId = btn.id;
+                break;
+            }
+        }
+
+        this.draw();
+        evt.preventDefault();
+    }
+
+
+    _onPointerUp(evt) {
+        // Only handle if this pointer was active
+        if (this.ui.pointerId !== evt.pointerId) return;
+
+        // Release capture immediately
+        this.canvas.releasePointerCapture(evt.pointerId);
+
+        const { activeZoneId, originalZone } = this.ui;
+
+        // === Detect change ===
+        if (activeZoneId && originalZone && this.model?.zones?.[activeZoneId]) {
+            const zNew = this.model.zones[activeZoneId];
+            const changed =
+                Math.abs(zNew.start.x - originalZone.start.x) > 1e-4 ||
+                Math.abs(zNew.start.y - originalZone.start.y) > 1e-4 ||
+                Math.abs(zNew.end.x - originalZone.end.x) > 1e-4 ||
+                Math.abs(zNew.end.y - originalZone.end.y) > 1e-4;
+
+            if (changed) {
+                this.model.isDirty = true; // flag unsaved changes
+                if (this.card) this.card._editMode = true;
+                if (this.card) this.card.showUnsavedBanner?.();
+            }
+        }
+
+        // === Reset drag state ===
+        this.ui.pointerId = null;
+        // Only clear active zone if user was dragging a handle (not simple click)
+        if (this.ui.activeHandle && this.ui.activeHandle.type !== "move") {
+            this.ui.activeZoneId = null;
+        }
+
+
+        // === Commit edits to model before releasing suppression ===
+        if (this.ui.activeHandle === 'angle' || this.ui.activeHandle === 'range') {
+            const oldTheta = this.model?.transform?.theta ?? 0;
+            const oldRange = this.model?.transform?.maxRange ?? 0;
+            const newTheta = this.theta;
+            const newRange = this.maxRange;
+
+            const oldThetaDeg = (oldTheta * 180 / Math.PI);
+            const newThetaDeg = (newTheta * 180 / Math.PI);
+
+            console.log('[PointerUp→updateRadarPose]', {
+                oldThetaDeg: oldThetaDeg.toFixed(2),
+                newThetaDeg: newThetaDeg.toFixed(2),
+                oldRangeM: oldRange.toFixed(2),
+                newRangeM: newRange.toFixed(2)
+            });
+
+            // Update the model (local, immediate)
+            if (typeof this.model?.updateRadarPose === 'function') {
+                this.model.updateRadarPose({
+                    angleDeg: newThetaDeg,
+                    rangeM: newRange
+                });
+            }
+
+            // ✅ Push to HA so HA state matches UI (prevents snap-backs on next HA sync)
+            this.card?.pushPoseToHA?.({ angleDeg: newThetaDeg, rangeM: newRange });
+
+            this.model.isDirty = true;
+        }
+        this.ui.activeHandle = null;
+        this.ui.dragStart = null;
+        this.ui.originalZone = null;
+
+        // === Reset Suppress Model Sync ===
+
+
+        this._suppressModelSync = false;
+        this._updateToolbarVisibility();
+        // Hide Delete button if no zone is selected
+        const delBtn = this._buttons.find(b => b.id === 'delete');
+        if (delBtn) delBtn.visible = !!this.ui.activeZoneId;
+
+        // Redraw once
+        this._uiFeedback.pressId = null;
+
+        this.draw();
+    }
+    _drawUIButton(ctx) {
+        if (!this._buttons) return;
+        ctx.save();
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        for (const btn of this._buttons) {
+            ctx.fillStyle = 'rgba(13,110,253,0.2)';
+            ctx.strokeStyle = 'rgba(13,110,253,0.7)';
+            ctx.lineWidth = 2;
+            ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 6);
+            ctx.fill();
+            ctx.stroke();
+            ctx.fillStyle = 'black';
+            ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+        }
+        ctx.restore();
+    }
+    _drawPushButton(ctx, params) {
+        const { w, h } = params.canvas;
+        const btn = {
+            x: w - 120,
+            y: h - 50,
+            w: 100,
+            h: 32,
+            text: "Push Zones"
+        };
+        this._pushButton = btn; // store for hit-test
+
+        // Draw
+        ctx.save();
+
+        // 🟠 highlight when dirty, 🟢 flash on press, 🔵 default
+        if (this._buttonFlash && Date.now() - this._buttonFlash.t < 300) {
+            ctx.fillStyle = this._buttonFlash.color;  // short green flash
+        } else if (this.model?.isDirty) {
+            ctx.fillStyle = "rgba(255,165,0,0.3)";    // amber = unsaved
+        } else {
+            ctx.fillStyle = "rgba(13,110,253,0.2)";   // normal blue tint
+        }
+
+        ctx.strokeStyle = "rgba(13,110,253,0.7)";
+        ctx.lineWidth = 2;
+        ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 6);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "black";
+        ctx.font = "14px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(btn.text, btn.x + btn.w / 2, btn.y + btn.h / 2);
+        ctx.restore();
+    }
+
 }
