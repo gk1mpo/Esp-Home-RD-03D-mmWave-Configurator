@@ -102,58 +102,16 @@ export class RadarCanvas {
         return true;
     }
     _setupButtons() {
-        if (this._buttons) return; // prevent reinitialisation
-
-        const size = 52;
-
-        this._buttons = {
-            add: { id: "add", w: size, h: size, visible: true },
-            edit: { id: "edit", w: size, h: size, visible: true },
-
-            save: { id: "save", w: size, h: size, visible: false },
-            discard: { id: "discard", w: size, h: size, visible: false },
-            angle: { id: "angle", w: size, h: size, visible: false },
-            range: { id: "range", w: size, h: size, visible: false },
-
-            delete: { id: "delete", w: size, h: size, visible: false }
-        };
+        const h = this.canvas.clientHeight || 400;
+        const y = h - 50; // 50px from bottom
+        this._buttons = [
+            { id: 'add', label: 'Add Zone', x: 20, y, w: 100, h: 32, visible: true },
+            { id: 'edit', label: 'Edit', x: 140, y, w: 80, h: 32, visible: true },
+            { id: 'save', label: 'Save', x: 240, y, w: 80, h: 32, visible: false },
+            { id: 'discard', label: 'Discard', x: 340, y, w: 100, h: 32, visible: false },
+            { id: 'delete', label: 'Delete', x: 460, y, w: 100, h: 32, visible: false }
+        ];
     }
-
-
-    _layoutButtons(params) {
-        if (!this._buttons || !params) return;
-
-        const { canvas, room } = params;
-        if (!canvas || !room || !room.size) return;
-
-        const GAP = 18;
-
-        // toolbar order left → right
-        const order = ["add", "edit", "save", "discard", "angle", "range", "delete"];
-
-        const visible = order
-            .map(id => this._buttons[id])
-            .filter(btn => btn && btn.visible);
-
-        if (!visible.length) return;
-
-        const totalWidth =
-            visible.reduce((sum, b) => sum + b.w, 0) +
-            GAP * (visible.length - 1);
-
-        let x = room.x + (room.size - totalWidth) / 2;
-        const y = room.y + room.size + GAP;
-
-        visible.forEach(b => {
-            b.x = x;
-            b.y = y;
-            x += b.w + GAP;
-        });
-    }
-
-
-
-
     installPointerHandlers() {
         const el = this.canvas;
         el.style.touchAction = "none"; // prevent browser gestures
@@ -367,37 +325,27 @@ export class RadarCanvas {
     _updateToolbarVisibility() {
         if (!this._buttons) return;
 
-        const editing = !!this.ui.editing;
-        const zoneSel = !!this.ui.activeZoneId;
+        const inEdit = this.ui.mode === 'edit';
+        const hasZone = !!this.ui.activeZoneId;
 
-        const show = id => this._buttons[id].visible = true;
-        const hide = id => this._buttons[id].visible = false;
-
-        if (!editing) {
-            show("add");
-            show("edit");
-
-            hide("save");
-            hide("discard");
-            hide("angle");
-            hide("range");
-            hide("delete");
-            return;
+        for (const b of this._buttons) {
+            switch (b.id) {
+                case 'edit':
+                    b.visible = !inEdit;               // hide Edit while editing
+                    break;
+                case 'save':
+                case 'discard':
+                    b.visible = inEdit;                // show when editing
+                    break;
+                case 'delete':
+                    b.visible = inEdit && hasZone;     // only when a zone is selected
+                    break;
+                default:
+                    // leave others as-is
+                    break;
+            }
         }
-
-        // edit mode (no zone)
-        show("add");
-        hide("edit");
-        show("save");
-        show("discard");
-        show("angle");
-        show("range");
-        hide("delete");
-
-        if (zoneSel) show("delete");
     }
-
-
 
     updateScaleGeometry() {
         // === 1. Measure canvas ===
@@ -428,23 +376,17 @@ export class RadarCanvas {
         this._hass = hass;
         this._selectedDevice = deviceId;
 
+        // Try to fetch live parameters from HA
         const distEntity = hass?.states?.[`number.${deviceId}_distance`];
         const dirEntity = hass?.states?.[`number.${deviceId}_installation_angle`];
 
-        if (distEntity) {
-            this.maxMeters = Number(distEntity.state);   // device distance entity
-            this.maxRange = this.maxMeters;             // start in sync with UI range
-        }
-        if (dirEntity) {
-            this.theta = Number(dirEntity.state) * Math.PI / 180;
-        }
+        if (distEntity) this.maxMeters = Number(distEntity.state);
+        if (dirEntity) this.theta = Number(dirEntity.state) * Math.PI / 180;
 
+        // Now we have real data → ready to draw
         this._ready = true;
-        if (this._parentCard?.debugger) {
-            console.info(
-                `[RadarCanvas] Context ready — device=${deviceId}, ` +
-                `maxMeters=${this.maxMeters}, theta=${(this.theta * 180 / Math.PI).toFixed(1)}°`
-            );
+        if (this._parentCard.debugger) {
+            console.info(`[RadarCanvas] Context ready — device=${deviceId}, maxMeters=${this.maxMeters}, theta=${(this.theta * 180 / Math.PI).toFixed(1)}°`);
         }
         this.draw();
     }
@@ -452,44 +394,31 @@ export class RadarCanvas {
         const w = this.canvas.clientWidth;
         const h = this.canvas.clientHeight;
 
-        // 5% outer margin, square room fitted to shortest axis
+        // ✅ keep consistent 5% margin with updateScaleGeometry()
         const margin = Math.min(w, h) * 0.05;
         const L = Math.min(w, h) - margin * 2;
         const offsetX = (w - L) / 2;
         const offsetY = (h - L) / 2;
 
+        // world room box (same logic as updateScaleGeometry)
         const room = { x: offsetX, y: offsetY, size: L };
 
-        // Clamp θ to [-π/4, +π/4]
+        // clamp θ to [-π/4, +π/4]
         const theta = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, this.theta));
 
-        // Linear slide of the origin along the top edge
+        // === linear slide: θ = 0 → centre, θ = ±π/4 → ±L/2 (edges)
         const slide = (theta / (Math.PI / 4)) * (L / 2);
-        const origin = {
-            x: room.x + room.size / 2 + slide,
-            y: room.y
-        };
 
+        // top-centre origin + horizontal slide
+        const origin = { x: offsetX + L / 2 + slide, y: offsetY + margin };
+
+        // uniform scale in metres → pixels
         const scale = L / this.maxRange;
 
+        // Keep instance state consistent with what we return
         this.origin = origin;
         this.SCALE = scale;
         this._currentTheta = theta;
-
-        const handlePadding = 12;
-
-        // Angle handle: just above the origin
-        const angleX = origin.x;
-        const angleY = room.y - handlePadding;
-
-        // Range handle: slide along vertical ruler according to range
-        const RANGE_MAX = 8; // hard clamp used in range dragging
-        const currentRange = this.maxRange ?? RANGE_MAX;
-        const t = Math.min(Math.max(currentRange / RANGE_MAX, 0), 1); // 0..1
-
-        const rangeX = room.x + room.size + handlePadding;
-        const rangeY = room.y + (1 - t) * room.size;  // 8m = top, 0m = bottom
-
         return {
             canvas: { w, h },
             room,
@@ -499,187 +428,61 @@ export class RadarCanvas {
             range: this.maxRange,
             zones: this.zones || {},
             targets: this.targets || {},
+            // in computeGeometry() return value
             handles: {
-                angle: { x: angleX, y: angleY },
-                range: { x: rangeX, y: rangeY }
+
+                angle: {
+                    x: origin.x,
+                    y: offsetY + 25
+                },
+                range: {
+                    x: offsetX + L - 25,
+                    y: offsetY + L / 2
+                }
             },
             toCanvas: (x, y) => this.worldToCanvas(x, y),
             toWorld: (px, py) => this.canvasToWorld(px, py)
         };
     }
 
-
-
     drawControls(ctx, params) {
-        // Only show angle + range handles while editing
         if (this.ui.mode !== 'edit') return;
-
-        const { handles, room } = params;
-        if (!handles || !room) return;
-
-        const RANGE_MAX = 8;
-        const currentRange = this.maxRange ?? RANGE_MAX;
-
+        const { handles } = params;
         ctx.save();
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
 
-        // 1. Angle handle
-        const handleRadius = 8;
-        ctx.fillStyle = 'rgba(255, 191, 0, 0.95)';
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fillStyle = 'rgba(255,165,0,0.9)';
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
         ctx.lineWidth = 1.5;
 
+        const r = 8;
+
+        // Angle handle
         ctx.beginPath();
-        ctx.arc(handles.angle.x, handles.angle.y, handleRadius, 0, 2 * Math.PI);
+        ctx.arc(handles.angle.x, handles.angle.y, r, 0, 2 * Math.PI);
         ctx.fill();
         ctx.stroke();
 
-        // 2. Vertical range ruler
-        const x = handles.range.x;
-        const topY = room.y;
-        const bottomY = room.y + room.size;
-        const capLen = 14;
-        const tickLen = 10;
-        const tickCount = 3;
-
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
-        ctx.lineWidth = 1.5;
-
+        // Range handle
         ctx.beginPath();
-        ctx.moveTo(x, topY);
-        ctx.lineTo(x, bottomY);
-        ctx.stroke();
-
-        // end caps
-        ctx.beginPath();
-        ctx.moveTo(x - capLen / 2, topY);
-        ctx.lineTo(x + capLen / 2, topY);
-        ctx.moveTo(x - capLen / 2, bottomY);
-        ctx.lineTo(x + capLen / 2, bottomY);
-        ctx.stroke();
-
-        // ladder ticks
-        const ladderOffset = 6;
-        for (let i = 0; i < tickCount; i++) {
-            const t = (i + 1) / (tickCount + 1);
-            const ty = topY + (bottomY - topY) * t;
-            ctx.beginPath();
-            ctx.moveTo(x + ladderOffset, ty - tickLen / 2);
-            ctx.lineTo(x + ladderOffset + tickLen, ty - tickLen / 2);
-            ctx.stroke();
-        }
-
-        // labels
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
-        ctx.font = '12px sans-serif';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-
-        const topLabel = `${RANGE_MAX.toFixed(0)}m`;
-        const bottomLabel = `${currentRange.toFixed(0)}m`;
-
-        ctx.fillText(topLabel, x + capLen + 6, topY);
-        ctx.fillText(bottomLabel, x + capLen + 6, bottomY);
-
-        // 3. Range handle (yellow dot on ruler – position already computed)
-        ctx.fillStyle = 'rgba(255, 191, 0, 0.95)';
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
-        ctx.lineWidth = 1.5;
-
-        ctx.beginPath();
-        ctx.arc(handles.range.x, handles.range.y, handleRadius, 0, 2 * Math.PI);
+        ctx.arc(handles.range.x, handles.range.y, r, 0, 2 * Math.PI);
         ctx.fill();
         ctx.stroke();
 
         ctx.restore();
     }
-
 
     drawRoomBox(ctx, params) {
         const { x, y, size } = params.room;
         ctx.save();
         ctx.lineWidth = 1.5;
-        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.strokeStyle = 'black';
         ctx.strokeRect(x, y, size, size);
-
-        // Radar origin marker on the top edge
-        ctx.fillStyle = 'rgba(255,128,0,0.9)';
+        ctx.fillStyle = 'orange';
         ctx.beginPath();
         ctx.arc(params.origin.x, params.origin.y, 4, 0, 2 * Math.PI);
         ctx.fill();
         ctx.restore();
     }
-    drawRoomGrid(ctx, params) {
-        const { room, range, scale } = params;
-        const maxM = Math.floor(range);
-        if (maxM <= 0) return;
-
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-        ctx.lineWidth = 1;
-
-        // Vertical and horizontal 1 m grid lines inside the room box
-        for (let m = 1; m < maxM; m++) {
-            const offset = m * scale;
-
-            // Vertical line
-            ctx.beginPath();
-            ctx.moveTo(room.x + offset, room.y);
-            ctx.lineTo(room.x + offset, room.y + room.size);
-            ctx.stroke();
-
-            // Horizontal line
-            ctx.beginPath();
-            ctx.moveTo(room.x, room.y + offset);
-            ctx.lineTo(room.x + room.size, room.y + offset);
-            ctx.stroke();
-        }
-
-        ctx.restore();
-    }
-    drawFanGrid(ctx, params) {
-        const { range, toCanvas } = params;
-        const steps = 96;
-        const half = Math.PI / 4; // ±45°
-        const maxR = range;
-        if (!isFinite(maxR) || maxR <= 0) return;
-
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0,0,0,0.18)';
-        ctx.lineWidth = 1;
-
-        // Concentric range rings every 1 m (world circle → canvas circle via worldToCanvas)
-        const rings = Math.floor(maxR);
-        for (let r = 1; r <= rings; r++) {
-            ctx.beginPath();
-            for (let i = 0; i <= steps; i++) {
-                const phi = -half + (i / steps) * (2 * half);
-                const wx = Math.sin(phi) * r;
-                const wy = -Math.cos(phi) * r;
-                const p = toCanvas(wx, wy);
-                if (i === 0) ctx.moveTo(p.x, p.y);
-                else ctx.lineTo(p.x, p.y);
-            }
-            ctx.stroke();
-        }
-
-        // Radial spokes for angle reference
-        const spokes = [-half, -half / 2, 0, half / 2, half];
-        const p0 = toCanvas(0, 0);
-        for (const phi of spokes) {
-            const wx = Math.sin(phi) * maxR;
-            const wy = -Math.cos(phi) * maxR;
-            const p1 = toCanvas(wx, wy);
-            ctx.beginPath();
-            ctx.moveTo(p0.x, p0.y);
-            ctx.lineTo(p1.x, p1.y);
-            ctx.stroke();
-        }
-
-        ctx.restore();
-    }
-
 
 
     drawFan(ctx, params) {
@@ -719,20 +522,8 @@ export class RadarCanvas {
                 y: room.y + y_m * scale
             };
         }
-        const { zones } = params;
+        const { zones, room, scale } = params;
         if (!zones) return;
-
-        // Palette per zone id (Z1 red, Z2 green, Z3 blue, Z4 yellow)
-        const palette = {
-            '1': { fill: 'rgba(220,53,69,0.15)', stroke: 'rgba(220,53,69,0.9)' }, // red
-            '2': { fill: 'rgba(25,135,84,0.15)', stroke: 'rgba(25,135,84,0.9)' }, // green
-            '3': { fill: 'rgba(13,110,253,0.15)', stroke: 'rgba(13,110,253,0.9)' }, // blue
-            '4': { fill: 'rgba(255,193,7,0.22)', stroke: 'rgba(255,193,7,0.95)' }  // yellow
-        };
-        const defaultColours = {
-            fill: 'rgba(255,0,0,0.10)',
-            stroke: 'rgba(255,0,0,0.4)'
-        };
 
         ctx.save();
         ctx.font = '12px monospace';
@@ -751,16 +542,13 @@ export class RadarCanvas {
             const w = Math.abs(p1.x - p2.x);
             const h = Math.abs(p1.y - p2.y);
 
-            const base = palette[id] || defaultColours;
-
-            // Occupied just boosts the alpha slightly
-            const fill = z.occupied
-                ? base.fill.replace(/0\\.15|0\\.10|0\\.22/, '0.35')
-                : base.fill;
-            const stroke = base.stroke;
-
-            ctx.fillStyle = fill;
-            ctx.strokeStyle = stroke;
+            // === Draw zone rectangle ===
+            ctx.fillStyle = z.occupied
+                ? 'rgba(0,255,0,0.25)'  // active → green
+                : 'rgba(255,0,0,0.10)'; // idle → faint red
+            ctx.strokeStyle = z.occupied
+                ? 'rgba(0,255,0,0.6)'
+                : 'rgba(255,0,0,0.4)';
             ctx.lineWidth = 1.5;
 
             ctx.fillRect(x, y, w, h);
@@ -769,32 +557,45 @@ export class RadarCanvas {
             // === Label ===
             ctx.fillStyle = 'black';
             ctx.fillText(`Z${id}`, x + w / 2, y + h / 2);
-
-            // === Handles + highlight for active zone in edit mode ===
+            /*
+            // === Optional: handles for edit mode ===
+            if (params.editMode) {
+                ctx.fillStyle = 'orange';
+                const handleSize = 6;
+                ctx.beginPath();
+                ctx.arc(p1.x, p1.y, handleSize, 0, 2 * Math.PI);
+                ctx.arc(p2.x, p2.y, handleSize, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+                */
+            // after drawing each zone rect...
             if (this.ui.mode === "edit" && this.ui.activeZoneId === id) {
                 const hs = this._computeHandlesForZone(z, params);
-                for (const hnd of hs) {
+                for (const h of hs) {
                     ctx.beginPath();
-                    if (hnd.type === "move") {
-                        ctx.fillStyle = "rgba(255,165,0,0.8)"; // orange centre
-                        ctx.arc(hnd.x, hnd.y, 6, 0, 2 * Math.PI);
+                    if (h.type === "move") {
+                        ctx.fillStyle = "rgba(255,165,0,0.7)"; // orange center
+                        ctx.arc(h.x, h.y, 6, 0, 2 * Math.PI);
                         ctx.fill();
                     } else {
-                        ctx.fillStyle = hnd.type === "corner" ? "#ffa500" : "#ffd166";
-                        ctx.arc(hnd.x, hnd.y, 5, 0, 2 * Math.PI);
+                        ctx.fillStyle = h.type === "corner" ? "#ffa500" : "#ffd166";
+                        ctx.arc(h.x, h.y, 5, 0, 2 * Math.PI);
                         ctx.fill();
                     }
                 }
                 // Highlight selected zone border
                 ctx.lineWidth = 2;
                 ctx.strokeStyle = "#0d6efd";
-                ctx.strokeRect(x, y, w, h);
+                ctx.strokeRect(
+                    Math.min(p1.x, p2.x), Math.min(p1.y, p2.y),
+                    Math.abs(p1.x - p2.x), Math.abs(p1.y - p2.y)
+                );
             }
         }
 
+
         ctx.restore();
     }
-
 
     drawTargets(ctx, params) {
         function radarToCanvas(x_m, y_m, params) {
@@ -1017,7 +818,6 @@ export class RadarCanvas {
         }
 
         const ctx = this.ctx;
-        if (!this._buttons) this._setupButtons();
         this.clear();
         try {
             //console.log("DRAW CALL", performance.now().toFixed(1),
@@ -1027,20 +827,17 @@ export class RadarCanvas {
             //this.updateScaleGeometry();
             const params = this.computeGeometry();
             // === Core geometry setup (inside draw) ===
-            this._layoutButtons(params);
 
             // draw UI layer first
             this._drawToolbar(ctx);
             this.drawControls(ctx, params);
 
-            // World layers: room → grids → fan → zones → targets
+            // then draw the world
             this.drawRoomBox(ctx, params);
-            this.drawRoomGrid(ctx, params);
-            this.drawFanGrid(ctx, params);
             this.drawFan(ctx, params);
+
             this.drawZones(ctx, params);
             this.drawTargets(ctx, params);
-            this._drawToolbar(ctx); // redraw controls on top
 
 
         } catch (err) {
@@ -1074,409 +871,57 @@ export class RadarCanvas {
     }
 
     resize() {
-        const rect = this.canvas.parentElement.getBoundingClientRect();
+        const rect = this.canvas.getBoundingClientRect();
+        const ratio = window.devicePixelRatio || 1;
 
-        // avoid invalid zero dimensions
-        if (rect.width < 100 || rect.height < 100) {
-            return; // wait for layout to stabilize
-        }
+        // Physical pixels for crispness
+        this.canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+        this.canvas.height = Math.max(1, Math.floor(rect.height * ratio));
 
-        const dpr = window.devicePixelRatio || 1;
+        // Reset transform, then apply DPR scale
+        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
 
-        this.canvas.width = rect.width * dpr;
-        this.canvas.height = rect.height * dpr;
-
-        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
+        // Store *logical* size for layout math
         this._width = rect.width;
         this._height = rect.height;
 
-        this.updateScaleGeometry();
-        this._updateToolbarVisibility();
+        this.updateScaleGeometry();  // new geometry precomputation
+        this._setupButtons();
+        this._sizeValid = true
         this.draw();
     }
     highlightZone(zoneNum) {
         this._highlightZone = zoneNum;
         this.draw();
     }
-
     _drawToolbar(ctx) {
         if (!this._buttons) return;
-
         ctx.save();
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.font = "13px sans-serif";
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
 
-        const labels = {
-            add: "add",
-            edit: "edit",
-            save: "save",
-            discard: "disregard",
-            angle: "angle",
-            range: "range",
-            delete: "delete zone"
-        };
+        for (const btn of this._buttons) {
+            if (!btn.visible) continue;
 
-        for (const b of this._buttons) {
-            if (!b.visible) continue;
+            let fill = 'rgba(13,110,253,0.15)';
+            let stroke = 'rgba(13,110,253,0.7)';
 
-            // tile
-            this._drawToolbarTile(ctx, b, b.id === "save" || b.id === "delete");
+            // Active highlight for edit mode
+            if (btn.id === 'edit' && this.ui.mode === 'edit')
+                fill = 'rgba(13,110,253,0.35)';
 
-            // icon
-            this._drawToolbarIcon(ctx, b);
+            ctx.fillStyle = fill;
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = 2;
+            ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 6);
+            ctx.fill();
+            ctx.stroke();
 
-            // label
-            ctx.fillStyle = "#000";
-            ctx.fillText(
-                labels[b.id],
-                b.x + b.w / 2,
-                b.y + b.h + 18
-            );
+            ctx.fillStyle = 'black';
+            ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2);
         }
-
-        ctx.restore();
-    }
-    _drawToolbarTile(ctx, btn, highlight = false) {
-        ctx.save();
-
-        const r = btn.w * 0.22;   // corner radius
-        const { x, y, w, h } = btn;
-
-        // tile background
-        ctx.beginPath();
-        ctx.roundRect(x, y, w, h, r);
-
-        ctx.fillStyle = highlight ? "rgba(180,200,255,0.35)" : "rgba(255,255,255,0.85)";
-        ctx.fill();
-
-        // border outline
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = highlight ? "rgba(50,80,200,0.8)" : "rgba(0,0,0,0.6)";
-        ctx.stroke();
-
-        // subtle shadow
-        ctx.shadowColor = "rgba(0,0,0,0.25)";
-        ctx.shadowBlur = 4;
-        ctx.shadowOffsetY = 2;
-        ctx.stroke();
-
-        ctx.restore();
-    }
-
-    _drawToolbar(ctx) {
-        if (!this._buttons) return;
-
-        ctx.save();
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.font = "13px sans-serif";
-
-        const labels = {
-            add: "add",
-            edit: "edit",
-            save: "save",
-            discard: "disregard",
-            angle: "angle edit",
-            range: "range",
-            delete: "delete zone"
-        };
-
-        Object.values(this._buttons)
-            .filter(b => b.visible)
-            .forEach(b => {
-
-                const highlight = (b.id === "save" || b.id === "delete");
-
-                // draw tile
-                this._drawToolbarTile(ctx, b, highlight);
-
-                // draw icon
-                this._drawToolbarIcon(ctx, b);
-
-                // draw label
-                ctx.fillStyle = "#000";
-                ctx.fillText(
-                    labels[b.id],
-                    b.x + b.w / 2,
-                    b.y + b.h + 18
-                );
-            });
-
-        ctx.restore();
-    }
-
-    _drawToolbarIcon(ctx, btn) {
-        const size = btn.w * 0.55;
-        const ix = btn.x + (btn.w - size) / 2;
-        const iy = btn.y + (btn.h - size) / 2;
-
-        switch (btn.id) {
-            case "add": return this._iconAdd(ctx, ix, iy, size);
-            case "edit": return this._iconEdit(ctx, ix, iy, size);
-            case "save": return this._iconSave(ctx, ix, iy, size);
-            case "discard": return this._iconUndo(ctx, ix, iy, size);
-            case "angle": return this._iconAngle(ctx, ix, iy, size);
-            case "range": return this._iconRange(ctx, ix, iy, size);
-            case "delete": return this._iconDeleteZone(ctx, ix, iy, size);
-        }
-    }
-    _iconBase(ctx, size) {
-        ctx.save();
-        ctx.strokeStyle = '#111111';
-        ctx.fillStyle = '#111111';
-        ctx.lineWidth = Math.max(1.5, size * 0.08);
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-    }
-    _iconAdd(ctx, x, y, size) {
-        this._iconBase(ctx, size);
-        const cX = x + size / 2;
-        const cY = y + size / 2;
-        const m = size * 0.25;
-
-        // vertical
-        ctx.beginPath();
-        ctx.moveTo(cX, y + m);
-        ctx.lineTo(cX, y + size - m);
-        ctx.stroke();
-
-        // horizontal
-        ctx.beginPath();
-        ctx.moveTo(x + m, cY);
-        ctx.lineTo(x + size - m, cY);
-        ctx.stroke();
-
-        ctx.restore();
-    }
-    _iconEdit(ctx, x, y, size) {
-        this._iconBase(ctx, size);
-
-        const startX = x + size * 0.25;
-        const startY = y + size * 0.70;
-        const endX = x + size * 0.75;
-        const endY = y + size * 0.30;
-
-        // pencil shaft
-        ctx.beginPath();
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(endX, endY);
-        ctx.stroke();
-
-        // tip
-        ctx.beginPath();
-        ctx.moveTo(endX, endY);
-        ctx.lineTo(endX + size * 0.08, endY - size * 0.08);
-        ctx.lineTo(endX + size * 0.02, endY + size * 0.10);
-        ctx.closePath();
-        ctx.fill();
-
-        // butt end line
-        ctx.beginPath();
-        ctx.moveTo(startX + size * 0.02, startY + size * 0.02);
-        ctx.lineTo(startX - size * 0.08, startY + size * 0.10);
-        ctx.stroke();
-
-        ctx.restore();
-    }
-    _iconSave(ctx, x, y, size) {
-        this._iconBase(ctx, size);
-
-        const cX = x + size / 2;
-        const top = y + size * 0.20;
-        const bottom = y + size * 0.70;
-
-        // vertical arrow
-        ctx.beginPath();
-        ctx.moveTo(cX, top);
-        ctx.lineTo(cX, bottom);
-        ctx.stroke();
-
-        // arrow head
-        ctx.beginPath();
-        ctx.moveTo(cX - size * 0.12, bottom - size * 0.12);
-        ctx.lineTo(cX, bottom + size * 0.02);
-        ctx.lineTo(cX + size * 0.12, bottom - size * 0.12);
-        ctx.stroke();
-
-        // small baseline
-        ctx.beginPath();
-        ctx.moveTo(x + size * 0.22, y + size * 0.80);
-        ctx.lineTo(x + size * 0.78, y + size * 0.80);
-        ctx.stroke();
-
-        ctx.restore();
-    }
-    _iconDelete(ctx, x, y, size) {
-        this._iconBase(ctx, size);
-
-        const w = size * 0.6;
-        const h = size * 0.55;
-        const bx = x + (size - w) / 2;
-        const by = y + (size - h) / 2 + size * 0.05;
-
-        // lid
-        ctx.beginPath();
-        ctx.moveTo(bx - size * 0.05, by);
-        ctx.lineTo(bx + w + size * 0.05, by);
-        ctx.stroke();
-
-        // body
-        ctx.beginPath();
-        ctx.rect(bx, by, w, h);
-        ctx.stroke();
-
-        // slats
-        ctx.beginPath();
-        ctx.moveTo(bx + w * 0.33, by + h * 0.15);
-        ctx.lineTo(bx + w * 0.33, by + h * 0.85);
-        ctx.moveTo(bx + w * 0.66, by + h * 0.15);
-        ctx.lineTo(bx + w * 0.66, by + h * 0.85);
-        ctx.stroke();
-
-        ctx.restore();
-    }
-    _iconUndo(ctx, x, y, size) {
-        this._iconBase(ctx, size);
-
-        const cX = x + size * 0.55;
-        const cY = y + size * 0.55;
-        const r = size * 0.35;
-
-        // curved path
-        ctx.beginPath();
-        ctx.arc(cX, cY, r, Math.PI * 1.1, Math.PI * 0.2, false);
-        ctx.stroke();
-
-        // arrow head at the left end
-        const ahX = cX + r * Math.cos(Math.PI * 1.1);
-        const ahY = cY + r * Math.sin(Math.PI * 1.1);
-
-        ctx.beginPath();
-        ctx.moveTo(ahX, ahY);
-        ctx.lineTo(ahX - size * 0.10, ahY - size * 0.10);
-        ctx.lineTo(ahX + size * 0.02, ahY - size * 0.14);
-        ctx.stroke();
-
-        ctx.restore();
-    }
-    _iconAngle(ctx, x, y, size) {
-        this._iconBase(ctx, size);
-        const baseY = y + size * 0.85;
-        const leftX = x + size * 0.15;
-        const rightX = x + size * 0.85;
-        const apexX = x + size * 0.55;
-        const apexY = y + size * 0.15;
-
-        // Base line
-        ctx.beginPath();
-        ctx.moveTo(leftX, baseY);
-        ctx.lineTo(rightX, baseY);
-        ctx.stroke();
-
-        // Slanted line (sensor arm)
-        ctx.beginPath();
-        ctx.moveTo(leftX, baseY);
-        ctx.lineTo(apexX, apexY);
-        ctx.stroke();
-
-        // Dashed inner arc
-        const cx = leftX;
-        const cy = baseY;
-        const r = size * 0.35;
-        const start = 0;
-        const end = -Math.atan2(baseY - apexY, apexX - leftX); // little bit up/left
-
-        ctx.setLineDash([r * 0.18, r * 0.12]);
-        ctx.beginPath();
-        ctx.arc(cx, cy, r * 0.75, start, end, true);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Outer arrow arc
-        const r2 = r;
-        const mid = (start + end) / 2;
-        const ex = cx + r2 * Math.cos(end);
-        const ey = cy + r2 * Math.sin(end);
-
-        ctx.beginPath();
-        ctx.arc(cx, cy, r2, start, end, true);
-        ctx.stroke();
-
-        // Arrow head
-        const ah = size * 0.15;
-        const ang = end;
-        const ax1 = ex + ah * Math.cos(ang + Math.PI * 0.75);
-        const ay1 = ey + ah * Math.sin(ang + Math.PI * 0.75);
-        const ax2 = ex + ah * Math.cos(ang - Math.PI * 0.75);
-        const ay2 = ey + ah * Math.sin(ang - Math.PI * 0.75);
-
-        ctx.beginPath();
-        ctx.moveTo(ex, ey);
-        ctx.lineTo(ax1, ay1);
-        ctx.moveTo(ex, ey);
-        ctx.lineTo(ax2, ay2);
-        ctx.stroke();
-
-        ctx.restore();
-    }
-
-    _iconRange(ctx, x, y, size) {
-        this._iconBase(ctx, size);
-
-        const cx = x + size / 2;
-        const topY = y + size * 0.15;
-        const bottomY = y + size * 0.85;
-        const barY = y + size * 0.73;
-
-        // Vertical line
-        ctx.beginPath();
-        ctx.moveTo(cx, topY);
-        ctx.lineTo(cx, barY - size * 0.08);
-        ctx.stroke();
-
-        // Arrow head
-        const ah = size * 0.16;
-        const tipY = barY - size * 0.08;
-        ctx.beginPath();
-        ctx.moveTo(cx, tipY);
-        ctx.lineTo(cx - ah * 0.8, tipY - ah);
-        ctx.moveTo(cx, tipY);
-        ctx.lineTo(cx + ah * 0.8, tipY - ah);
-        ctx.stroke();
-
-        // Baseline
-        const barW = size * 0.7;
-        ctx.beginPath();
-        ctx.moveTo(cx - barW / 2, barY);
-        ctx.lineTo(cx + barW / 2, barY);
-        ctx.stroke();
-
-        ctx.restore();
-    }
-    _iconDeleteZone(ctx, x, y, s) {
-        ctx.save();
-        ctx.lineWidth = s * 0.08;
-        ctx.strokeStyle = "#000";
-
-        // outer rounded square
-        ctx.beginPath();
-        ctx.roundRect(x + s * 0.05, y + s * 0.05, s * 0.9, s * 0.9, s * 0.18);
-        ctx.stroke();
-
-        // minus bar
-        ctx.beginPath();
-        ctx.moveTo(x + s * 0.25, y + s * 0.5);
-        ctx.lineTo(x + s * 0.75, y + s * 0.5);
-        ctx.stroke();
-
-        // small bin in corner
-        const bx = x + s * 0.60;
-        const by = y + s * 0.60;
-        ctx.beginPath();
-        ctx.rect(bx, by, s * 0.28, s * 0.28);
-        ctx.stroke();
 
         ctx.restore();
     }
@@ -1593,11 +1038,13 @@ export class RadarCanvas {
         if (this.ui.activeHandle === 'range') {
             const delta = -evt.movementY;
             const dRange = delta / 50;
-            const newRange = Math.max(1, Math.min(8, this.maxRange + dRange));
-
-            this.maxRange = newRange;
-            this.maxMeters = newRange; // keep label in sync
-
+            this.maxRange = Math.max(1, Math.min(8, this.maxRange + dRange));
+            /*
+            this.model?.updateRadarPose?.({
+                angleDeg: this.theta * 180 / Math.PI,
+                rangeM: this.maxRange,
+                silent: true
+            });*/
             this.model?.updateRadarPose?.({
                 angleDeg: this.theta * 180 / Math.PI,
                 rangeM: this.maxRange,

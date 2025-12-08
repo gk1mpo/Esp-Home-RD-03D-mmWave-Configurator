@@ -143,32 +143,7 @@
 }
 
 .canvas-wrapper {
-  width: min(90vw, 600px);
-  /* control width only */
-  height: auto;
-  /* allow vertical expansion */
-  aspect-ratio: 1 / 1;
-  /* enforce square canvas area */
-  position: relative;
-  margin: 0 auto;
-  /* center horizontally */
-}
-
-/* Canvas wrapper vertical padding fix */
-.epz-canvas-cell {
-  position: relative;
-  width: 100%;
-  padding-bottom: 120%;
-  /* 100% = square, 120% = square + toolbar space */
   display: flex;
   justify-content: center;
-  align-items: center;
-}
-
-.epz-canvas-cell canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100% !important;
-  height: 100% !important;
+  width: 100%;
 }

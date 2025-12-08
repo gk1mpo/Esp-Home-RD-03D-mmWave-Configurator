@@ -15,90 +15,67 @@ class EPZoneConfiguratorCard extends HTMLElement {
     this._hass = null;
     this.bridge = null;
     this.debug = false;
-    this.debugMode = true; // used in hass() logging
-    this._suppressModelSync = false
-    this.draging = false;
+    this.debugMode = false; // used in hass() logging
   }
 
   // === Home Assistant binding ===
   set hass(hass) {
     // Store a stable reference
     this._hass = hass;
-    if (this.draging) {
-      console.log("hass update received draging");
-      return;
+
+    if (this.debugMode) {
+      console.groupCollapsed(
+        "%c[EPZ] hass update",
+        "color:#09f;font-weight:bold;"
+      );
+      console.log("hass update received");
+      console.log("selectedDevice:", this._selectedDevice);
+      console.log("initialized:", this._initialized);
+      console.log("canvas exists:", !!this.radarCanvas);
+      console.log("canvas dpi:", window.devicePixelRatio);
+      console.log("canvas size:", {
+        width: this.canvas?.width,
+        height: this.canvas?.height
+      });
+      console.groupEnd();
     }
-    if (!this.draging) {
-      if (this.debugMode) {
-        console.groupCollapsed(
-          "%c[EPZ] hass update",
-          "color:#09f;font-weight:bold;"
-        );
-        console.log("hass update received");
-        console.log("selectedDevice:", this._selectedDevice);
-        console.log("initialized:", this._initialized);
-        console.log("canvas exists:", !!this.radarCanvas);
-        console.log("canvas dpi:", window.devicePixelRatio);
-        console.log("this.draging ", this.draging);
-        console.log("canvas size:", {
-          width: this.canvas?.width,
-          height: this.canvas?.height
-        });
-        console.groupEnd();
+
+    // 1️⃣ Build the DOM + canvas once, the first time HA sets hass
+    if (!this._initialized) {
+      this.initialize();          // creates shadowRoot, canvas, sidebar, etc.
+      this._initialized = true;
+    }
+
+    // 2️⃣ Create or update the bridge
+    if (!this.bridge && hass) {
+      this.bridge = new LovelaceBridgeInterface(hass);
+      console.info("[EPZ] Bridge initialized.");
+    } else if (this.bridge) {
+      // keep bridge up-to-date with the latest hass object
+      this.bridge.hass = hass;
+    }
+
+    // 3️⃣ If we already know which device is selected, wire the canvas to it
+    if (this.radarCanvas && this._selectedDevice) {
+      // Only update HA context — NO BIND, NO RESIZE
+      this.radarCanvas.setContext({
+        hass,
+        deviceId: this._selectedDevice,
+      });
+    }
+
+    // 4️⃣ Keep the model in sync with HA entities
+    if (this._initialized) {
+      this.syncModelFromHA();
+    }
+
+    // 5️⃣ Show connection label once
+    if (!this._haReady && this.shadowRoot) {
+      const status = this.shadowRoot.querySelector(".status-text");
+      if (status) {
+        status.textContent = "Connected to Home Assistant ✅";
       }
-
-      // 1️⃣ Build the DOM + canvas once, the first time HA sets hass
-      if (!this._initialized) {
-        this.initialize();          // creates shadowRoot, canvas, sidebar, etc.
-        this._initialized = true;
-      }
-
-      // 2️⃣ Create or update the bridge
-      if (!this.bridge && hass) {
-        this.bridge = new LovelaceBridgeInterface(hass);
-        console.info("[EPZ] Bridge initialized.");
-      } else if (this.bridge) {
-        // keep bridge up-to-date with the latest hass object
-        this.bridge.hass = hass;
-      }
-
-      // 3️⃣ If we already know which device is selected, wire the canvas to it
-      if (this.radarCanvas && this._selectedDevice) {
-        // Only update HA context — NO BIND, NO RESIZE
-        this.radarCanvas.setContext({
-          hass,
-          deviceId: this._selectedDevice,
-        });
-      }
-
-      // 4️⃣ Keep the model in sync with HA entities
-      if (this._initialized) {
-
-        // 🔒 Hard block: NEVER sync model from HA during drag
-        if (this._suppressModelSync) {
-          //console.warn("🔥  set hass(hass) inside set hass during _suppressModelSync = ", this._suppressModelSync);
-          return;
-        }
-      }
-
-      // Normal case: safe to sync
-
-
-      if (!this._suppressModelSync) {
-        if (!this.draging) {
-          //console.warn("🔥 syncModelFromHA() inside set hass during draging = ", this.draging);
-          this.syncModelFromHA();
-          return;
-        }
-      }
-      // 5️⃣ Show connection label once
-      if (!this._haReady && this.shadowRoot) {
-        const status = this.shadowRoot.querySelector(".status-text");
-        if (status) {
-          status.textContent = "Connected to Home Assistant ✅";
-        }
-        this._haReady = true;
-      }
+      this._haReady = true;
     }
   }
 
@@ -106,31 +83,20 @@ class EPZoneConfiguratorCard extends HTMLElement {
   syncModelFromHA() {
     if (!this._hass || !this._selectedDevice || !this.model) return;
     const dev = this._selectedDevice;
-    // 🔒 C-2: do nothing while the canvas is dragging
-    if (this._suppressModelSync) {
-      console.warn("🔥 syncModelFromHA() CALLED DURING DRAG — SUPPRESSED");
-      return;
-    }
-    // --- C-2B: Suppress HA sync while dragging ---
-    if (this._suppressModelSync) {
-      console.warn("🔥 syncModelFromHA() CALLED DURING DRAG — THIS CAUSES SNAPBACK");
-      //console.debug("[Card] syncModelFromHA suppressed during drag.");
-      return;
-    }
 
     // 1️⃣ Always sync zones unless the user is editing
     if (!this._editMode) {
       const zones = this._loadZonesFromHA?.();
       if (zones) this.model.updateZones(zones);
     } else {
-      //console.debug("[Card] Edit mode active — skipping HA zone overwrite.");
+      console.debug("[Card] Edit mode active — skipping HA zone overwrite.");
     }
 
     // 2️⃣ Pose (angle/range) — skip only while dragging those handles
     const poseDragActive =
       this.radarCanvas?.ui?.activeHandle === "angle" ||
       this.radarCanvas?.ui?.activeHandle === "range";
-    //console.debug(this.radarCanvas?.ui?.activeHandle);
+
     if (!poseDragActive) {
       const angleDeg = Number(
         this._hass.states[`number.${dev}_installation_angle`]?.state || 0
@@ -138,7 +104,7 @@ class EPZoneConfiguratorCard extends HTMLElement {
       const rangeM = Number(
         this._hass.states[`number.${dev}_distance`]?.state || 6
       );
-      this.model.updateRadarPose({ angleDeg, rangeM, });
+      this.model.updateRadarPose({ angleDeg, rangeM });
     } else {
       console.debug(
         "[Card] Pose update from HA suppressed during handle drag."

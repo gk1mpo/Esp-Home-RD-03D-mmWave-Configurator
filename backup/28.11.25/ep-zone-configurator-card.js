@@ -15,90 +15,67 @@ class EPZoneConfiguratorCard extends HTMLElement {
     this._hass = null;
     this.bridge = null;
     this.debug = false;
-    this.debugMode = true; // used in hass() logging
-    this._suppressModelSync = false
-    this.draging = false;
+    this.debugMode = false; // used in hass() logging
   }
 
   // === Home Assistant binding ===
   set hass(hass) {
     // Store a stable reference
     this._hass = hass;
-    if (this.draging) {
-      console.log("hass update received draging");
-      return;
+
+    if (this.debugMode) {
+      console.groupCollapsed(
+        "%c[EPZ] hass update",
+        "color:#09f;font-weight:bold;"
+      );
+      console.log("hass update received");
+      console.log("selectedDevice:", this._selectedDevice);
+      console.log("initialized:", this._initialized);
+      console.log("canvas exists:", !!this.radarCanvas);
+      console.log("canvas dpi:", window.devicePixelRatio);
+      console.log("canvas size:", {
+        width: this.canvas?.width,
+        height: this.canvas?.height
+      });
+      console.groupEnd();
     }
-    if (!this.draging) {
-      if (this.debugMode) {
-        console.groupCollapsed(
-          "%c[EPZ] hass update",
-          "color:#09f;font-weight:bold;"
-        );
-        console.log("hass update received");
-        console.log("selectedDevice:", this._selectedDevice);
-        console.log("initialized:", this._initialized);
-        console.log("canvas exists:", !!this.radarCanvas);
-        console.log("canvas dpi:", window.devicePixelRatio);
-        console.log("this.draging ", this.draging);
-        console.log("canvas size:", {
-          width: this.canvas?.width,
-          height: this.canvas?.height
-        });
-        console.groupEnd();
+
+    // 1️⃣ Build the DOM + canvas once, the first time HA sets hass
+    if (!this._initialized) {
+      this.initialize();          // creates shadowRoot, canvas, sidebar, etc.
+      this._initialized = true;
+    }
+
+    // 2️⃣ Create or update the bridge
+    if (!this.bridge && hass) {
+      this.bridge = new LovelaceBridgeInterface(hass);
+      console.info("[EPZ] Bridge initialized.");
+    } else if (this.bridge) {
+      // keep bridge up-to-date with the latest hass object
+      this.bridge.hass = hass;
+    }
+
+    // 3️⃣ If we already know which device is selected, wire the canvas to it
+    if (this.radarCanvas && this._selectedDevice) {
+      // Only update HA context — NO BIND, NO RESIZE
+      this.radarCanvas.setContext({
+        hass,
+        deviceId: this._selectedDevice,
+      });
+    }
+
+    // 4️⃣ Keep the model in sync with HA entities
+    if (this._initialized) {
+      this.syncModelFromHA();
+    }
+
+    // 5️⃣ Show connection label once
+    if (!this._haReady && this.shadowRoot) {
+      const status = this.shadowRoot.querySelector(".status-text");
+      if (status) {
+        status.textContent = "Connected to Home Assistant ✅";
       }
-
-      // 1️⃣ Build the DOM + canvas once, the first time HA sets hass
-      if (!this._initialized) {
-        this.initialize();          // creates shadowRoot, canvas, sidebar, etc.
-        this._initialized = true;
-      }
-
-      // 2️⃣ Create or update the bridge
-      if (!this.bridge && hass) {
-        this.bridge = new LovelaceBridgeInterface(hass);
-        console.info("[EPZ] Bridge initialized.");
-      } else if (this.bridge) {
-        // keep bridge up-to-date with the latest hass object
-        this.bridge.hass = hass;
-      }
-
-      // 3️⃣ If we already know which device is selected, wire the canvas to it
-      if (this.radarCanvas && this._selectedDevice) {
-        // Only update HA context — NO BIND, NO RESIZE
-        this.radarCanvas.setContext({
-          hass,
-          deviceId: this._selectedDevice,
-        });
-      }
-
-      // 4️⃣ Keep the model in sync with HA entities
-      if (this._initialized) {
-
-        // 🔒 Hard block: NEVER sync model from HA during drag
-        if (this._suppressModelSync) {
-          //console.warn("🔥  set hass(hass) inside set hass during _suppressModelSync = ", this._suppressModelSync);
-          return;
-        }
-      }
-
-      // Normal case: safe to sync
-
-
-      if (!this._suppressModelSync) {
-        if (!this.draging) {
-          //console.warn("🔥 syncModelFromHA() inside set hass during draging = ", this.draging);
-          this.syncModelFromHA();
-          return;
-        }
-      }
-      // 5️⃣ Show connection label once
-      if (!this._haReady && this.shadowRoot) {
-        const status = this.shadowRoot.querySelector(".status-text");
-        if (status) {
-          status.textContent = "Connected to Home Assistant ✅";
-        }
-        this._haReady = true;
-      }
+      this._haReady = true;
     }
   }
 
@@ -106,31 +83,20 @@ class EPZoneConfiguratorCard extends HTMLElement {
   syncModelFromHA() {
     if (!this._hass || !this._selectedDevice || !this.model) return;
     const dev = this._selectedDevice;
-    // 🔒 C-2: do nothing while the canvas is dragging
-    if (this._suppressModelSync) {
-      console.warn("🔥 syncModelFromHA() CALLED DURING DRAG — SUPPRESSED");
-      return;
-    }
-    // --- C-2B: Suppress HA sync while dragging ---
-    if (this._suppressModelSync) {
-      console.warn("🔥 syncModelFromHA() CALLED DURING DRAG — THIS CAUSES SNAPBACK");
-      //console.debug("[Card] syncModelFromHA suppressed during drag.");
-      return;
-    }
 
     // 1️⃣ Always sync zones unless the user is editing
     if (!this._editMode) {
-      const zones = this._loadZonesFromHA?.();
+      const zones = this._loadZonesFromHA?.(); // uses your existing zone loader
       if (zones) this.model.updateZones(zones);
     } else {
-      //console.debug("[Card] Edit mode active — skipping HA zone overwrite.");
+      console.debug("[Card] Edit mode active — skipping HA zone overwrite.");
     }
 
     // 2️⃣ Pose (angle/range) — skip only while dragging those handles
     const poseDragActive =
       this.radarCanvas?.ui?.activeHandle === "angle" ||
       this.radarCanvas?.ui?.activeHandle === "range";
-    //console.debug(this.radarCanvas?.ui?.activeHandle);
+
     if (!poseDragActive) {
       const angleDeg = Number(
         this._hass.states[`number.${dev}_installation_angle`]?.state || 0
@@ -138,7 +104,7 @@ class EPZoneConfiguratorCard extends HTMLElement {
       const rangeM = Number(
         this._hass.states[`number.${dev}_distance`]?.state || 6
       );
-      this.model.updateRadarPose({ angleDeg, rangeM, });
+      this.model.updateRadarPose({ angleDeg, rangeM });
     } else {
       console.debug(
         "[Card] Pose update from HA suppressed during handle drag."
@@ -152,7 +118,6 @@ class EPZoneConfiguratorCard extends HTMLElement {
     // 4️⃣ Sidebar refresh
     this.updateSidebar?.();
   }
-
 
   pushPoseToHA({ angleDeg, rangeM }) {
     if (!this._hass || !this._selectedDevice) return;
@@ -171,35 +136,9 @@ class EPZoneConfiguratorCard extends HTMLElement {
       svc(`number.${dev}_distance`, rangeM);
     }
   }
-  _loadStyles() {
-    // Only load once
-    if (this._stylesLoaded) return;
-    this._stylesLoaded = true;
-
-    fetch('/local/Esp-Home-RD-03D-mmWave-Configurator/styles.css')
-      .then(r => r.text())
-      .then(css => {
-        if (!this.shadowRoot) {
-          console.error("EPZ: shadowRoot missing when loading styles");
-          return;
-        }
-
-        const style = document.createElement('style');
-        style.textContent = css;
-        this.shadowRoot.appendChild(style);
-
-        console.log("EPZ: styles loaded successfully");
-      })
-      .catch(err => console.error("EPZ: Failed to load CSS:", err));
-  }
-  connectedCallback() {
-    //super.connectedCallback();
-    this._loadStyles();   // <-- ADD THIS
-  }
 
   // === Initial DOM and canvas setup ===
   initialize() {
-
     // Create shadow DOM once
     if (!this.shadowRoot) {
       this.attachShadow({ mode: "open" });
@@ -210,39 +149,91 @@ class EPZoneConfiguratorCard extends HTMLElement {
     container.classList.add("epz-container");
 
     container.innerHTML = `
-      <div class="epz-container">
-      <h2 class="epz-title">Everything Presence Zone Configurator</h2>
+  <style>
+    .epz-container {
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      box-sizing: border-box;
+    }
 
-      <div class="epz-canvas-cell">
-        <canvas id="visualizationCanvas"></canvas>
-      </div>
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
 
-      <div class="epz-toolbar-area">
-        <select class="device-select"></select>
-        <span class="status-text"></span>
-      </div>
+    .device-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0 16px;
+    }
 
-     </div>
-     `;
+    .status-text {
+      font-size: 0.9rem;
+      opacity: 0.7;
+    }
+
+    /* --- Canvas block --- */
+    .canvas-center {
+      display: flex;
+      justify-content: center;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    .canvas-wrapper {
+      width: min(90vw, 500px);   /* choose the size you want here */
+      height: min(90vw, 500px);
+      position: relative;
+    }
+
+    #visualizationCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* canvas toolbar sits under canvas */
+    .epz-toolbar-area {
+      display: flex;
+      justify-content: center;
+      margin-top: 12px;
+      min-height: 40px;
+    }
+  </style>
+
+  <header class="header">
+    <h2>Everything Presence Zone Configurator</h2>
+  </header>
+
+  <div class="device-line">
+    <select class="device-select"></select>
+    <span class="status-text"></span>
+  </div>
+
+  <div class="canvas-center">
+    <div class="canvas-wrapper">
+      <canvas id="visualizationCanvas"></canvas>
+    </div>
+  </div>
+
+  <div class="epz-toolbar-area"></div>
+`;
 
     // Attach to shadow DOM
     this.shadowRoot.append(container);
 
     // Store references
     this.canvas = this.shadowRoot.querySelector("#visualizationCanvas");
-
-    // Use the existing canvas cell as the wrapper
-    this.canvasWrapper = this.shadowRoot.querySelector(".epz-canvas-cell");
-
-
+    this.canvasWrapper = this.shadowRoot.querySelector(".canvas-wrapper");
     this.toolbarArea = this.shadowRoot.querySelector(".epz-toolbar-area");
-
-    // Zones sidebar no longer exists; keep this but allow null
     this.zoneList = this.shadowRoot.querySelector("#zone-tiles");
 
     // Initialize model + canvas
     this.radarCanvas = new RadarCanvas(this.canvas, this.model, { card: this });
-    console.log("[CARD] Assigned radarCanvas", this.radarCanvas);
     this.radarCanvas.bindModel(this.model);
 
     // Resize observer (firstUpdated on HTMLElement would never fire)
@@ -335,55 +326,17 @@ class EPZoneConfiguratorCard extends HTMLElement {
 
     for (const [zoneNum, z] of Object.entries(zones)) {
       if (!z.start || !z.end) continue;
-
       const prefix = `number.${this._selectedDevice}_zone_${zoneNum}`;
       const svc = (eid, value) =>
         this._hass.callService("number", "set_value", {
           entity_id: eid,
           value: value.toFixed(3),
         });
-
-      // Save geometry
       svc(`${prefix}_x_begin`, z.start.x);
       svc(`${prefix}_x_end`, z.end.x);
       svc(`${prefix}_y_begin`, z.start.y);
       svc(`${prefix}_y_end`, z.end.y);
-
-      // Save enabled state
-      const enableEntity = `switch.${this._selectedDevice}_zone_${zoneNum}_enable`;
-      this._hass.callService(
-        "switch",
-        z.enabled ? "turn_on" : "turn_off",
-        { entity_id: enableEntity }
-      );
     }
-
-    // --- PATCH C-1.2: Clean up deleted zone in HA ---
-    if (this._deletedZone) {
-      const dev = this._selectedDevice;
-      const i = this._deletedZone;
-
-      // Turn off the enable switch
-      this._hass.callService("switch", "turn_off", {
-        entity_id: `switch.${dev}_zone_${i}_enable`
-      });
-
-      // Wipe coordinates
-      const zero = (eid) =>
-        this._hass.callService("number", "set_value", {
-          entity_id: eid,
-          value: 0
-        });
-
-      zero(`number.${dev}_zone_${i}_x_begin`);
-      zero(`number.${dev}_zone_${i}_x_end`);
-      zero(`number.${dev}_zone_${i}_y_begin`);
-      zero(`number.${dev}_zone_${i}_y_end`);
-
-      console.warn(`[C-1.2] Zone ${i} fully cleared from HA.`);
-      this._deletedZone = null;
-    }
-    // --- END PATCH C-1.2 ---
 
     console.info("[Card] Zones saved to HA in radar-relative coordinates.");
     this._editMode = false;
@@ -496,8 +449,6 @@ class EPZoneConfiguratorCard extends HTMLElement {
     this._config = config || {};
     this.debug = !!this._config.debug;
     this.debugMode = !!this._config.debug;
-
-    this._loadStyles();   // <-- ADD THIS
   }
 
   getCardSize() {

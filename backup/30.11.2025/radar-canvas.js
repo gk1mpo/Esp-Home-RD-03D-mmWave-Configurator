@@ -1,6 +1,8 @@
 export class RadarCanvas {
     constructor(canvas, model, options = {}) {
+        console.log("[RC] NEW RadarCanvas instance created", this);
         this.canvas = canvas;
+
         this.ctx = canvas.getContext('2d');
         this.model = model || null;     // ✅ model is required for updateZones()
         this.card = options.card || null; // ✅ optional: parent card for push/save
@@ -34,40 +36,10 @@ export class RadarCanvas {
     }
     bindModel(model) {
         this.model = model;
-        this._ready = true; // the canvas is now tied to a data source
-        this.waitForStableSize(() => {
-            this.resize();
-            this.draw();
-        });
-
-        // Subscribe to model updates
-        model.onChange((type) => {
-            if (this._suppressModelSync) {
-                //console.warn('[RadarCanvas] Model sync suppressed');
-                return;
-            }
-            //console.warn('[RadarCanvas] Model sync Not suppressed');
-            const prevActive = this.ui.activeZoneId;  // 🧩 preserve active selection
-            if (model.zones) this.zones = model.zones;
-            if (model.targets) this.targets = model.targets;
-
-            // Pull geometry state from model.transform if it changed
-            const t = model.transform;
-            if (t) {
-                this.origin = t.origin;
-                this.SCALE = t.scale;
-                this.theta = t.theta;
-                this.maxRange = t.maxRange;
-            }
-
-            // 🧠 restore zone highlight after redraw
-            if (prevActive && this.zones[prevActive]) {
-                this.ui.activeZoneId = prevActive;
-            }
-
-            this.draw();
-        });
+        // allow DOM to settle
+        //setTimeout(() => this.resize(), 50);
     }
+
     waitForStableSize(callback) {
         const el = this.canvas;
         if (!el) return;
@@ -117,6 +89,8 @@ export class RadarCanvas {
 
             delete: { id: "delete", w: size, h: size, visible: false }
         };
+        console.log("_setupButtons " + this._buttons);
+
     }
 
 
@@ -166,57 +140,69 @@ export class RadarCanvas {
     }
     _handleUIButton(id) {
         switch (id) {
-            case 'add':
+            case "add":
                 this._addZone();
                 break;
 
-            case 'edit': {
-                const enteringEdit = this.ui.mode !== 'edit';
-                this.ui.mode = enteringEdit ? 'edit' : 'view';
+            case "edit": {
+                const enteringEdit = this.ui.mode !== "edit";
+                this.ui.mode = enteringEdit ? "edit" : "view";
 
                 if (enteringEdit) {
-                    this.card && (this.card._editMode = true);
+                    if (this.card) this.card._editMode = true;
                 } else {
-                    this.card && (this.card._editMode = false);
+                    if (this.card) this.card._editMode = false;
                     this.model.isDirty = false;
-                    this.ui.activeZoneId = null;           // leaving edit clears selection
+                    this.ui.activeZoneId = null; // leaving edit clears selection
                 }
 
                 this._updateToolbarVisibility();
                 this.draw();
-                console.log(`[EditMode] ${enteringEdit ? 'Entered' : 'Exited'} edit mode`);
+                console.log(
+                    `[EditMode] ${enteringEdit ? "Entered" : "Exited"} edit mode`
+                );
                 break;
             }
 
-            case 'save': {
+            case "save": {
                 this.card?.saveZonesToHA?.();
-                this.ui.mode = 'view';
-                this.card && (this.card._editMode = false);
-                this.ui.activeZoneId = null;             // nothing selected after save
-                this._updateToolbarVisibility();         // hides delete, shows Edit, hides Save/Discard
+                this.ui.mode = "view";
+                if (this.card) this.card._editMode = false;
+                this.ui.activeZoneId = null;
+
+                this._updateToolbarVisibility();
                 this.draw();
                 break;
             }
 
-            case 'discard': {
+            case "discard": {
                 this.card?.loadZonesFromHA?.();
-                this.ui.mode = 'view';
-                this.card && (this.card._editMode = false);
-                this.ui.activeZoneId = null;             // clear selection
+                this.ui.mode = "view";
+                if (this.card) this.card._editMode = false;
+
                 this._updateToolbarVisibility();
                 this.draw();
                 break;
             }
 
             case 'delete': {
-                if (this.ui.activeZoneId) {
+                const zoneId = this.ui.activeZoneId;
+                if (zoneId) {
                     const zones = { ...this.model?.zones };
-                    delete zones[this.ui.activeZoneId];
+                    delete zones[zoneId];
                     this.model?.updateZones(zones);
-                    this.ui.activeZoneId = null;           // no selection after delete
-                    this.model.isDirty = true;             // delete is an edit
+
+                    // Tell card that deletion affects HA
+                    if (this.card) {
+                        this.card._deletedZone = zoneId;   // mark for HA clean-up
+                        this.card._editMode = true;
+                    }
+
+                    this.ui.activeZoneId = null;
+                    this.model.isDirty = true;
                 }
-                this._updateToolbarVisibility();         // hides Delete button
+
+                this._updateToolbarVisibility();
                 this.draw();
                 break;
             }
@@ -255,9 +241,23 @@ export class RadarCanvas {
             start: { x: x1, y: y1 },
             end: { x: x2, y: y2 }
         });
+        const zoneId = nextId;
 
         // Commit to model (single source of truth)
         this.model?.updateZones?.(zones);
+
+
+        if (this.model.zones && this.model.zones[zoneId]) {
+            this.model.zones[zoneId].enabled = true;
+        }
+        // Make this the selected zone
+        this.ui.activeZoneId = zoneId;
+        // Switch canvas into edit mode
+        this.ui.mode = "edit";
+
+        if (this.card) {
+            this.card._editMode = true;
+        }
 
 
         // Switch to edit mode and mark dirty so Save/Discard/Delete appear
@@ -267,7 +267,7 @@ export class RadarCanvas {
             this.card._editMode = true;
             this._updateToolbarVisibility();
             // show Save/Discard/Delete buttons in the toolbar
-            for (const b of this._buttons) {
+            for (const b of Object.values(this._buttons)) {
                 if (['save', 'discard', 'delete'].includes(b.id))
                     b.visible = true;
             }
@@ -367,13 +367,15 @@ export class RadarCanvas {
     _updateToolbarVisibility() {
         if (!this._buttons) return;
 
-        const editing = !!this.ui.editing;
+        // Canvas is the master: edit mode is tracked via ui.mode
+        const editing = this.ui.mode === "edit";
         const zoneSel = !!this.ui.activeZoneId;
 
-        const show = id => this._buttons[id].visible = true;
-        const hide = id => this._buttons[id].visible = false;
+        const show = (id) => (this._buttons[id].visible = true);
+        const hide = (id) => (this._buttons[id].visible = false);
 
         if (!editing) {
+            // VIEW MODE – only Add + Edit visible
             show("add");
             show("edit");
 
@@ -385,45 +387,69 @@ export class RadarCanvas {
             return;
         }
 
-        // edit mode (no zone)
-        show("add");
+        // EDIT MODE – Edit is hidden, Save/Discard/Angle/Range shown
         hide("edit");
         show("save");
         show("discard");
         show("angle");
         show("range");
-        hide("delete");
 
-        if (zoneSel) show("delete");
+        // Delete only visible when a zone is selected
+        if (zoneSel) {
+            show("delete");
+        } else {
+            hide("delete");
+        }
     }
 
 
 
+
     updateScaleGeometry() {
-        // === 1. Measure canvas ===
+        // 1. Measure rendered size
         const w = this.canvas.clientWidth;
         const h = this.canvas.clientHeight;
-        const margin = Math.min(w, h) * 0.05;  // 5% padding all around
+
+        if (!w || !h) {
+            console.warn("[RadarCanvas] updateScaleGeometry: invalid canvas size");
+            return;
+        }
+
+        const margin = Math.min(w, h) * 0.05;  // 5% padding
         const roomSize = Math.min(w, h) - margin * 2;
 
-        // === 2. Scale derivation ===
-        this.SCALE = roomSize / this.maxRange;   // uniform metres→pixels
-        // (Optionally later we can add SCALE_X/Y for anisotropic control)
+        // 2. Device Pixel Ratio
+        const dpr = window.devicePixelRatio || 1;
 
-        // === 3. Origin placement ===
-        this.origin = { x: w / 2, y: margin };   // top-centre radar mount
+        // 3. Compute SCALE (metres → CSS pixels, *not* device pixels)
+        if (this.maxRange > 0) {
+            this.SCALE = (roomSize / this.maxRange);
+        } else {
+            this.SCALE = 1;
+        }
 
-        // === 4. Store geometry snapshot for downstream functions ===
+        // 4. Set origin (top-centre)
+        this.origin = {
+            x: w / 2,
+            y: margin
+        };
+
+        // 5. Snapshot for downstream
         this._geometry = {
             canvas: { w, h },
             margin,
             roomSize,
             origin: this.origin,
             scale: this.SCALE,
+            dpr,
             theta: this.theta,
             range: this.maxRange
         };
+
+        console.log("[updateScaleGeometry] SCALE =", this.SCALE);
     }
+
+
     setContext({ hass, deviceId }) {
         this._hass = hass;
         this._selectedDevice = deviceId;
@@ -446,19 +472,27 @@ export class RadarCanvas {
                 `maxMeters=${this.maxMeters}, theta=${(this.theta * 180 / Math.PI).toFixed(1)}°`
             );
         }
+        //this._ready = true;
         this.draw();
     }
     computeGeometry() {
         const w = this.canvas.clientWidth;
         const h = this.canvas.clientHeight;
 
-        // 5% outer margin, square room fitted to shortest axis
-        const margin = Math.min(w, h) * 0.05;
-        const L = Math.min(w, h) - margin * 2;
-        const offsetX = (w - L) / 2;
-        const offsetY = (h - L) / 2;
+        // Base size taken from the shorter side (normally the width)
+        const base = Math.min(w, h);
 
-        const room = { x: offsetX, y: offsetY, size: L };
+        // 5% outer margin based on base
+        const margin = base * 0.05;
+
+        // Square room fitted to the base, with side L
+        const L = base - margin * 2;
+
+        // Center horizontally, anchor near the top to leave band underneath
+        const offsetX = (w - L) / 2;
+        const roomY = margin; // TOP-anchored room, not vertically centered
+
+        const room = { x: offsetX, y: roomY, size: L };
 
         // Clamp θ to [-π/4, +π/4]
         const theta = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, this.theta));
@@ -497,8 +531,8 @@ export class RadarCanvas {
             scale,
             theta,
             range: this.maxRange,
-            zones: this.zones || {},
-            targets: this.targets || {},
+            zones: (this.model && this.model.zones) || {},
+            targets: (this.model && this.model.targets) || {},
             handles: {
                 angle: { x: angleX, y: angleY },
                 range: { x: rangeX, y: rangeY }
@@ -958,12 +992,7 @@ export class RadarCanvas {
             y: x * sinT + y * cosT
         };
     }
-    /*
-    rx = x cosT - y sinT   → clockwise
-    ry = x sinT + y cosT   → clockwise
-    rx = x cosT + y sinT   → anticlockwise
-    ry = -x sinT + y cosT  → anticlockwise
-    */
+
 
     worldToCanvas(x, y) {
         const t = this.theta;   // align world +Y with fan’s +X-based drawing
@@ -1012,19 +1041,34 @@ export class RadarCanvas {
 
     draw() {
         if (!this.isReady()) {
-            console.warn('[RadarCanvas] draw() skipped — data not ready.');
+            console.warn("[RadarCanvas] draw() skipped — data not ready.", {
+                ready: this._ready,
+                origin: this.origin,
+                SCALE: this.SCALE,
+                maxRange: this.maxRange,
+                model_has_transform: !!this.model?.transform,
+                model_zones: Object.keys(this.model?.zones || {}).length
+            });
             return;
+        }
+
+        if (this.debugMode) {
+            console.groupCollapsed(
+                "%c[RadarCanvas.draw] ready",
+                "color:#0a0;font-weight:bold;"
+            );
+            console.log("origin:", this.origin);
+            console.log("SCALE:", this.SCALE);
+            console.log("theta:", this.theta);
+            console.log("maxRange:", this.maxRange);
+            console.groupEnd();
         }
 
         const ctx = this.ctx;
         if (!this._buttons) this._setupButtons();
         this.clear();
         try {
-            //console.log("DRAW CALL", performance.now().toFixed(1),
-            //    "zones=", Object.keys(this.model?.zones || {}).length,
-            //    "caller:", (new Error()).stack.split("\n")[2]);
 
-            //this.updateScaleGeometry();
             const params = this.computeGeometry();
             // === Core geometry setup (inside draw) ===
             this._layoutButtons(params);
@@ -1074,27 +1118,82 @@ export class RadarCanvas {
     }
 
     resize() {
-        const rect = this.canvas.parentElement.getBoundingClientRect();
+        console.groupCollapsed(
+            "%c[RadarCanvas.resize]",
+            "color:#fa0;font-weight:bold;"
+        );
 
-        // avoid invalid zero dimensions
-        if (rect.width < 100 || rect.height < 100) {
-            return; // wait for layout to stabilize
+        if (!this.canvas || !this.ctx) {
+            console.warn("[RadarCanvas] resize() called before canvas is ready");
+            console.groupEnd();
+            return;
+        }
+
+        // Canvas wrapper (the div the canvas sits in)
+        const wrapper = this.canvas.parentElement;
+        if (!wrapper) {
+            console.warn("[RadarCanvas] resize() — no parentElement for canvas yet");
+            console.groupEnd();
+            return;
+        }
+
+        const rect = wrapper.getBoundingClientRect();
+        console.log("[RadarCanvas.resize] wrapper rect:", rect);
+
+        if (rect.width < 50 || rect.height < 50) {
+            console.warn(
+                "[RadarCanvas] resize() — wrapper too small, skipping for now"
+            );
+            console.groupEnd();
+            return;
         }
 
         const dpr = window.devicePixelRatio || 1;
 
-        this.canvas.width = rect.width * dpr;
-        this.canvas.height = rect.height * dpr;
+        // --- RECTANGULAR CANVAS WITH BOTTOM BAND ---
+        // We still keep the concept of a "reserved" band for controls,
+        // but the canvas itself is now allowed to be taller than it is wide.
+        const TOOLBAR_RESERVE = 80; // target extra height for toolbar inside canvas
 
+        // Width is locked to wrapper width
+        const cssWidth = rect.width;
+
+        // Ideal height = square room (cssWidth) + extra toolbar band.
+        // Clamp to wrapper height so we never overflow the card.
+        const idealHeight = cssWidth + TOOLBAR_RESERVE;
+        const cssHeight = Math.min(rect.height, idealHeight);
+
+        // CSS size
+        this.canvas.style.width = `${cssWidth}px`;
+        this.canvas.style.height = `${cssHeight}px`;
+
+        // Internal DPR-scaled buffer
+        this.canvas.width = Math.round(cssWidth * dpr);
+        this.canvas.height = Math.round(cssHeight * dpr);
+
+        // 1 CSS pixel == 1 logical drawing unit; DPR handled above
         this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-        this._width = rect.width;
-        this._height = rect.height;
+        this._width = cssWidth;
+        this._height = cssHeight;
 
+        console.log("[RadarCanvas.resize] canvas CSS size:", {
+            cssWidth,
+            cssHeight,
+            bufferWidth: this.canvas.width,
+            bufferHeight: this.canvas.height
+        });
+
+        // Recompute SCALE, origin, geometry and redraw
         this.updateScaleGeometry();
-        this._updateToolbarVisibility();
+        this._updateToolbarVisibility?.();
         this.draw();
+
+        console.groupEnd();
+
     }
+
+
     highlightZone(zoneNum) {
         this._highlightZone = zoneNum;
         this.draw();
@@ -1118,7 +1217,7 @@ export class RadarCanvas {
             delete: "delete zone"
         };
 
-        for (const b of this._buttons) {
+        for (const b of Object.values(this._buttons)) {
             if (!b.visible) continue;
 
             // tile
@@ -1483,11 +1582,13 @@ export class RadarCanvas {
 
 
     _onPointerDown(evt) {
+        console.log("[RC] PointerDown using instance:", this);
+        console.log("[RC] this.ui BEFORE setting handle:", this.ui);
         if (this.ui.pointerId !== null) return;
         const p = this._getCanvasPoint(evt);
 
         // 1) Toolbar buttons always work
-        for (const btn of this._buttons) {
+        for (const btn of Object.values(this._buttons)) {
             if (btn.visible &&
                 p.x >= btn.x && p.x <= btn.x + btn.w &&
                 p.y >= btn.y && p.y <= btn.y + btn.h) {
@@ -1505,15 +1606,35 @@ export class RadarCanvas {
         const { handles } = params;
         const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
         if (d(p, handles.angle) < 12) {
+            console.log("handles.angle", evt.pointerId);
+
             this.ui.pointerId = evt.pointerId;
             this.ui.activeHandle = 'angle';
-            this.canvas.setPointerCapture(evt.pointerId);
+            evt.preventDefault();
+            evt.stopPropagation();
+
+            try {
+                this.canvas.setPointerCapture(evt.pointerId);
+            } catch (e) {
+                console.warn("Pointer capture failed:", e);
+            }
+
+            this._suppressModelSync = true;   // freeze HA sync while dragging angle
             return;
         }
         if (d(p, handles.range) < 12) {
+            console.log("handles.range", evt.pointerId);
             this.ui.pointerId = evt.pointerId;
             this.ui.activeHandle = 'range';
-            this.canvas.setPointerCapture(evt.pointerId);
+            evt.preventDefault();
+            evt.stopPropagation();
+
+            try {
+                this.canvas.setPointerCapture(evt.pointerId);
+            } catch (e) {
+                console.warn("Pointer capture failed:", e);
+            }
+            this._suppressModelSync = true;   // freeze HA sync while dragging range
             return;
         }
 
@@ -1533,7 +1654,14 @@ export class RadarCanvas {
 
         // Capture zone and start drag or selection
         console.log("Before capture", evt.pointerId);
-        this.canvas.setPointerCapture(evt.pointerId);
+        evt.preventDefault();
+        evt.stopPropagation();
+
+        try {
+            this.canvas.setPointerCapture(evt.pointerId);
+        } catch (e) {
+            console.warn("Pointer capture failed:", e);
+        }
         console.log("After capture (should persist next frame)");
         this.ui.pointerId = evt.pointerId;
         this.ui.activeZoneId = hitZoneId;
@@ -1544,9 +1672,12 @@ export class RadarCanvas {
             room: this._canvasToRoom(px, py, params)
         };
         if (this.ui.activeZoneId && this.ui.mode === 'edit') {
-            const delBtn = this._buttons.find(b => b.id === 'delete');
+            const delBtn = Object.values(this._buttons).find(b => b.id === 'delete')
             if (delBtn) delBtn.visible = true;
         }
+
+        // Activate HA sync suppression for the duration of this drag/select.
+        this._suppressModelSync = true;
 
         // ✅ Defer deep-copy setup to next animation frame to avoid race
         requestAnimationFrame(() => {
@@ -1664,7 +1795,7 @@ export class RadarCanvas {
         // === 7️⃣ Update hover feedback for toolbar
         const p = this._getCanvasPoint(evt);
         this._uiFeedback.hoverId = null;
-        for (const btn of this._buttons) {
+        for (const btn of Object.values(this._buttons)) {
             if (p.x >= btn.x && p.x <= btn.x + btn.w &&
                 p.y >= btn.y && p.y <= btn.y + btn.h) {
                 this._uiFeedback.hoverId = btn.id;
@@ -1703,7 +1834,7 @@ export class RadarCanvas {
         }
 
         // === Reset drag state ===
-        this.ui.pointerId = null;
+        //this.ui.pointerId = null;
         // Only clear active zone if user was dragging a handle (not simple click)
         if (this.ui.activeHandle && this.ui.activeHandle.type !== "move") {
             this.ui.activeZoneId = null;
@@ -1740,7 +1871,11 @@ export class RadarCanvas {
 
             this.model.isDirty = true;
         }
-        this.ui.activeHandle = null;
+        if (evt.pointerId === this.ui.pointerId) {
+            this.ui.pointerId = null;
+            this.ui.activeHandle = null;
+        }
+
         this.ui.dragStart = null;
         this.ui.originalZone = null;
 
@@ -1750,7 +1885,7 @@ export class RadarCanvas {
         this._suppressModelSync = false;
         this._updateToolbarVisibility();
         // Hide Delete button if no zone is selected
-        const delBtn = this._buttons.find(b => b.id === 'delete');
+        const delBtn = Object.values(this._buttons).find(b => b.id === 'delete')
         if (delBtn) delBtn.visible = !!this.ui.activeZoneId;
 
         // Redraw once
@@ -1765,7 +1900,7 @@ export class RadarCanvas {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        for (const btn of this._buttons) {
+        for (const btn of Object.values(this._buttons)) {
             ctx.fillStyle = 'rgba(13,110,253,0.2)';
             ctx.strokeStyle = 'rgba(13,110,253,0.7)';
             ctx.lineWidth = 2;

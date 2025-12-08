@@ -3,7 +3,6 @@ import { RadarTransform } from "./radar-transform.js";
 
 export class RadarModel {
   constructor() {
-    this.silentUpdate = false; // if true, suppress change events
     this.transform = new RadarTransform();
     this.zones = {};     // {id: {start:{x,y}, end:{x,y}}}  (world coords)
     this.targets = [];   // [{x,y,velocity,intensity}, …]
@@ -31,8 +30,6 @@ export class RadarModel {
     this._emitChange("targets");
   }
   updateRadarPose({ angleDeg, rangeM, silent = false }) {
-    if (this.silentUpdate) return;
-    //console.warn("🔥 updateRadarPose ,this.silentUpdate", this.silentUpdate, "silent ", silent);
     const t = this.transform;
     if (!t) return;
 
