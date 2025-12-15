@@ -1,0 +1,1392 @@
+#############################################################
+#  ESPHome – RD-03D Radar (v4.2 EPL-Compatible, self-contained)
+#  - Includes v4 baseline: UART init, parser, sensors, Reinitialize button
+#  - Adds EPL compatibility layer: Occupancy, Distance/Off-Delay, Targets 1–3,
+#    Zones 1–4 controls and "In Zone" binaries for use with the EPL Zone Configurator.
+#############################################################
+substitutions:
+  friendly_name: "ESP Sensor 1"
+esphome:
+  name: esp-sensor-1
+  friendly_name: Esp_sensor_1
+  project:
+    name: everythingsmarthome.everything_presence_lite
+    version: "4.2"
+  
+  on_boot:
+    priority: 600
+    then:
+      - delay: 2s
+      - lambda: |-
+          const uint8_t OPEN_CMD[8]    = {0xAA,0xFF,0x01,0x00,0x01,0x00,0x55,0xCC};
+          const uint8_t MULTI_CMD[12]  = {0xFD,0xFC,0xFB,0xFA,0x02,0x00,0x90,0x00,0x04,0x03,0x02,0x01};
+          const uint8_t SINGLE_CMD[12] = {0xFD,0xFC,0xFB,0xFA,0x02,0x00,0x80,0x00,0x04,0x03,0x02,0x01};
+          id(rd03_uart).write_array(OPEN_CMD, sizeof(OPEN_CMD));
+          delay(30);
+          if (id(rd03_mode).state == "Multi") {
+            id(rd03_uart).write_array(MULTI_CMD, sizeof(MULTI_CMD));
+            ESP_LOGI("rd03d", "Boot: MULTI mode");
+          } else {
+            id(rd03_uart).write_array(SINGLE_CMD, sizeof(SINGLE_CMD));
+            ESP_LOGI("rd03d", "Boot: SINGLE mode");
+          }
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: WARN
+  baud_rate: 0
+
+#"replace-with-your-api-key"
+api:
+  encryption:
+    key: "Jk51Yj7sI7ceGKdTvQugGmC2DGI6mimkdx1OmdH0YFI="
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: "d7fa40332e77f66f0c2025b9cb3ad26d"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  power_save_mode: none
+  ap:
+    ssid: "Esp-Sensor-1 Fallback"
+    password: "fallback-pass"
+
+captive_portal:
+
+web_server:
+  port: 80
+
+#############################################################
+# UART – RD-03D radar serial connection
+#############################################################
+uart:
+  id: rd03_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 256000
+  rx_buffer_size: 4096
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+
+#############################################################
+# User-selectable controls
+#############################################################
+select:
+  - platform: template
+    name: "RD-03D Update Speed"
+    id: update_speed
+    optimistic: true
+    options: [ "Slow", "Medium", "Fast" ]
+    initial_option: "Slow"
+    restore_value: true
+
+  - platform: template
+    name: "RD-03D Mode"
+    id: rd03_mode
+    optimistic: true
+    options: [ "Multi", "Single" ]
+    initial_option: "Multi"
+    restore_value: true
+    set_action:
+      - lambda: |-
+          const uint8_t OPEN_CMD[8]    = {0xAA,0xFF,0x01,0x00,0x01,0x00,0x55,0xCC};
+          const uint8_t MULTI_CMD[12]  = {0xFD,0xFC,0xFB,0xFA,0x02,0x00,0x90,0x00,0x04,0x03,0x02,0x01};
+          const uint8_t SINGLE_CMD[12] = {0xFD,0xFC,0xFB,0xFA,0x02,0x00,0x80,0x00,0x04,0x03,0x02,0x01};
+          id(rd03_uart).write_array(OPEN_CMD, sizeof(OPEN_CMD));
+          delay(30);
+          if (id(rd03_mode).state == "Multi") {
+            id(rd03_uart).write_array(MULTI_CMD, sizeof(MULTI_CMD));
+            ESP_LOGI("rd03d", "Set MULTI mode");
+          } else {
+            id(rd03_uart).write_array(SINGLE_CMD, sizeof(SINGLE_CMD));
+            ESP_LOGI("rd03d", "Set SINGLE mode");
+          }
+
+#############################################################
+# Globals – target memory
+#############################################################
+globals:
+  - { id: last_seen_ms, type: uint32_t, initial_value: "0" }
+  - { id: target_count, type: int, initial_value: "0" }
+  - { id: nearest_m, type: float, initial_value: "0.0" }
+
+  - { id: t1_detected,  type: bool,  initial_value: "false" }
+  - { id: t1_x_m,       type: float, initial_value: "0.0" }
+  - { id: t1_y_m,       type: float, initial_value: "0.0" }
+  - { id: t1_speed_mps, type: float, initial_value: "0.0" }
+  - { id: t1_dist_m,    type: float, initial_value: "0.0" }
+  - { id: t1_angle_deg, type: float, initial_value: "0.0" }
+
+  - { id: t2_detected,  type: bool,  initial_value: "false" }
+  - { id: t2_x_m,       type: float, initial_value: "0.0" }
+  - { id: t2_y_m,       type: float, initial_value: "0.0" }
+  - { id: t2_speed_mps, type: float, initial_value: "0.0" }
+  - { id: t2_dist_m,    type: float, initial_value: "0.0" }
+  - { id: t2_angle_deg, type: float, initial_value: "0.0" }
+
+  - { id: t3_detected,  type: bool,  initial_value: "false" }
+  - { id: t3_x_m,       type: float, initial_value: "0.0" }
+  - { id: t3_y_m,       type: float, initial_value: "0.0" }
+  - { id: t3_speed_mps, type: float, initial_value: "0.0" }
+  - { id: t3_dist_m,    type: float, initial_value: "0.0" }
+  - { id: t3_angle_deg, type: float, initial_value: "0.0" }
+  # UART / parser health
+  - id: uart_bytes_pending
+    type: uint16_t
+    initial_value: "0"
+
+  - id: uart_frames_parsed
+    type: uint32_t
+    initial_value: "0"
+
+  - id: uart_frames_bad
+    type: uint32_t
+    initial_value: "0"
+
+  - id: uart_loop_ms
+    type: uint16_t
+    initial_value: "0"
+    
+  - id: rd03_last_seen_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: rd03_backlog_since_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: z1_last_hit_ms
+    type: uint32_t
+    initial_value: '0'
+
+  - id: z2_last_hit_ms
+    type: uint32_t
+    initial_value: '0'
+
+  - id: z3_last_hit_ms
+    type: uint32_t
+    initial_value: '0'
+
+  - id: z4_last_hit_ms
+    type: uint32_t
+    initial_value: '0'
+
+  - id: radar_room_x
+    type: float
+    initial_value: '0.0'     # meters
+
+  - id: radar_room_y
+    type: float
+    initial_value: '0.0'     # meters
+
+  - id: radar_room_theta_deg
+    type: float
+    initial_value: '0.0'     # degrees (0 = facing +Y or +X — see note below)
+
+  - id: dbg_xs
+    type: float
+    initial_value: '0.0'
+
+  - id: dbg_ys
+    type: float
+    initial_value: '0.0'
+
+  - id: dbg_room_x
+    type: float
+    initial_value: '0.0'
+
+  - id: dbg_room_y
+    type: float
+    initial_value: '0.0'
+
+
+
+#############################################################
+# Parser – reads UART frames (14B single / 30B multi), updates globals
+#############################################################
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          const size_t backlog = (size_t) id(rd03_uart_bytes_pending).state;
+
+          if (backlog > 1024) {
+            if (id(rd03_backlog_since_ms) == 0)
+              id(rd03_backlog_since_ms) = millis();
+
+            if (millis() - id(rd03_backlog_since_ms) > 3000) {
+              ESP_LOGW("rd03", "UART backlog watchdog triggered (%u bytes)", backlog);
+              id(rd03_send_init).execute();
+              id(rd03_backlog_since_ms) = 0;
+            }
+          } else {
+            id(rd03_backlog_since_ms) = 0;
+          }
+
+  - interval: 100ms
+    then:
+      - lambda: |-
+          static uint32_t last_run = 0;
+          const uint32_t now = millis();
+          // user throttle
+          std::string sel = id(update_speed).state.c_str();
+          uint32_t period_ms = 1000;
+          if (sel == "Medium") period_ms = 500;
+          else if (sel == "Fast") period_ms = 100;
+          if ((now - last_run) < period_ms) return;
+          last_run = now;
+
+                    uint32_t t0 = millis();
+
+          static std::vector<uint8_t> acc;
+          static size_t offset = 0;
+
+          // Pull bytes into buffer
+          while (id(rd03_uart).available() > 0) {
+            uint8_t b;
+            id(rd03_uart).read_byte(&b);
+            acc.push_back(b);
+          }
+
+          // How many bytes are actually pending after the current read position
+          size_t avail = (acc.size() > offset) ? (acc.size() - offset) : 0;
+          id(uart_bytes_pending) = (uint16_t)avail;
+
+          // Hard cap to avoid unbounded growth
+          const size_t MAX_BUF = 512;
+          if (acc.size() > MAX_BUF) {
+            size_t drop = acc.size() - MAX_BUF;
+            if (drop > offset) drop = offset;
+            if (drop > 0) {
+              acc.erase(acc.begin(), acc.begin() + drop);
+              offset -= drop;
+            }
+            avail = (acc.size() > offset) ? (acc.size() - offset) : 0;
+            id(uart_frames_bad)++;  // we had to drop data
+          }
+          
+
+          auto sensor_to_room = [&](float xs, float ys, float &xr_out, float &yr_out) {
+              const float DEG2RAD = 3.14159265f / 180.0f;
+
+              // Physical install rotation (degrees -> radians)
+              const float a = id(epl_install_angle).state * DEG2RAD;
+              const float ca = cosf(a);
+              const float sa = sinf(a);
+
+              // Physical sensor position on the top wall:
+              // --- SLIDING SENSOR POSITION (authoritative model) ---
+              const float R = id(epl_distance).state;
+              const float angle_deg = id(epl_install_angle).state;
+
+              // Map angle [-45,+45] → t [0,1]
+              float t = (angle_deg + 45.0f) / 90.0f;
+              if (t < 0.0f) t = 0.0f;
+              if (t > 1.0f) t = 1.0f;
+
+              const float sensor_x = t * R;
+              const float sensor_y = 0.0f;
+
+
+              // Rotate sensor-space point into room space and add sensor position
+              xr_out = sensor_x + (xs * ca - ys * sa);
+              yr_out = sensor_y + (xs * sa + ys * ca);
+            };
+          auto ru16 = [&](const std::vector<uint8_t>& v, int i)->uint16_t {
+            return (uint16_t)v[i] | ((uint16_t)v[i+1] << 8);
+          };
+          auto sfix = [&](uint16_t raw)->int32_t {
+            bool neg = ((raw & 0x8000) == 0);
+            int32_t mag = (int32_t)(raw & 0x7FFF);
+            return neg ? -mag : mag;
+          };
+          const uint8_t H0=0xAA,H1=0xFF,H2=0x03,H3=0x00, T0=0x55,T1=0xCC;
+
+          while (true) {
+            avail = (acc.size() > offset) ? (acc.size() - offset) : 0;
+            if (avail < 14) break;
+
+            // Pointer to first byte of candidate frame
+            const uint8_t *p = acc.data() + offset;
+
+            // Sync to header
+            if (!(p[0]==H0 && p[1]==H1 && p[2]==H2 && p[3]==H3)) {
+              offset++;        // slide by one, no massive erase
+              continue;
+            }
+
+            bool have30 = (avail >= 30) && (p[28]==T0 && p[29]==T1);
+            bool have14 = (avail >= 14) && (p[12]==T0 && p[13]==T1);
+
+            if (!have30 && !have14) {
+              if (avail >= 30) {
+                offset++;      // bad frame, move on
+                id(uart_frames_bad)++;
+                continue;
+              }
+              break;           // wait for more bytes
+            }
+
+            // Reset targets
+            id(t1_detected)=id(t2_detected)=id(t3_detected)=false;
+            id(target_count)=0;
+            id(nearest_m)=0.0f;
+
+            if (have30) {
+              // Copy just the frame slice
+              std::vector<uint8_t> f(acc.begin() + offset, acc.begin() + offset + 30);
+              offset += 30;
+
+              auto handle = [&](int base, int idx){
+
+                uint16_t raw_x = ru16(f, base+0);
+                uint16_t raw_y = ru16(f, base+2);
+                uint16_t vr    = ru16(f, base+4);
+
+                int32_t xmm = sfix(raw_x);
+                int32_t ymm = sfix(raw_y);
+                int32_t vcm = sfix(vr);
+
+                bool det=(xmm||ymm||vcm);
+                if (!det) return;
+
+                float xs = xmm / 1000.0f;
+                float ys = ymm / 1000.0f;
+                float v  = vcm / 100.0f;
+
+                // Sensor-relative distance & angle
+                float d = sqrtf(xs*xs + ys*ys);
+                const float PI = 3.14159265f;
+                float ang = atan2f(ys, xs) * 180.0f / PI;
+
+                // ONE transform → room space
+                float room_x, room_y;
+                sensor_to_room(xs, ys, room_x, room_y);
+                if (idx == 1) { // for multi-target handle()
+                  id(dbg_xs) = xs;
+                  id(dbg_ys) = ys;
+                  id(dbg_room_x) = room_x;
+                  id(dbg_room_y) = room_y;
+                }
+
+                if (idx==1){ id(t1_detected)=true; id(t1_x_m)=room_x; id(t1_y_m)=room_y; id(t1_speed_mps)=v; id(t1_dist_m)=d; id(t1_angle_deg)=ang; }
+                if (idx==2){ id(t2_detected)=true; id(t2_x_m)=room_x; id(t2_y_m)=room_y; id(t2_speed_mps)=v; id(t2_dist_m)=d; id(t2_angle_deg)=ang; }
+                if (idx==3){ id(t3_detected)=true; id(t3_x_m)=room_x; id(t3_y_m)=room_y; id(t3_speed_mps)=v; id(t3_dist_m)=d; id(t3_angle_deg)=ang; }
+
+
+                if (id(nearest_m)==0.0f || d<id(nearest_m)) id(nearest_m)=d;
+                id(target_count)++;
+              };
+              handle(4,1); handle(12,2); handle(20,3);
+              if (id(target_count)>0) id(last_seen_ms)=millis();
+
+            } else { // 14-byte single-target frame
+
+              std::vector<uint8_t> f(acc.begin() + offset, acc.begin() + offset + 14);
+              offset += 14;
+
+              uint16_t raw_x = ru16(f,4);
+              uint16_t raw_y = ru16(f,6);
+              uint16_t vr    = ru16(f,8);
+
+              int32_t xmm = sfix(raw_x);
+              int32_t ymm = sfix(raw_y);
+              int32_t vcm = sfix(vr);
+              
+              bool det=(xmm||ymm||vcm);
+              if (det) {
+                float xs = xmm / 1000.0f;
+                float ys = ymm / 1000.0f;
+                float v  = vcm / 100.0f;
+
+                // Sensor-relative distance & angle
+                float d = sqrtf(xs*xs + ys*ys);
+                const float PI = 3.14159265f;
+                float ang = atan2f(ys, xs) * 180.0f / PI;
+
+                // ONE transform → room space
+                float room_x, room_y;
+                sensor_to_room(xs, ys, room_x, room_y);
+                id(dbg_xs) = xs;
+                id(dbg_ys) = ys;
+                id(dbg_room_x) = room_x;
+                id(dbg_room_y) = room_y;
+                id(t1_detected)=true;
+                id(t1_x_m)=room_x; id(t1_y_m)=room_y; id(t1_speed_mps)=v;
+                id(t1_dist_m)=d; id(t1_angle_deg)=ang;
+
+
+                id(target_count)=1;
+                id(nearest_m)=d;
+                id(last_seen_ms)=millis();
+                id(rd03_last_seen_ms) = millis();
+
+              }
+            }
+
+            id(uart_frames_parsed)++;
+          }
+
+          // Compact vector occasionally so offset never grows without bound
+          if (offset > 0 && offset > acc.size() / 2) {
+            acc.erase(acc.begin(), acc.begin() + offset);
+            offset = 0;
+          }
+
+          id(uart_loop_ms) = (uint16_t)(millis() - t0);     
+  - interval: 200ms
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          if (id(rd03_last_seen_ms) == 0) return;
+
+          if (now - id(rd03_last_seen_ms) > 2000) {
+            id(target_count) = 0;
+            id(nearest_m) = 0.0f;
+            id(t1_detected) = false;
+            id(t2_detected) = false;
+            id(t3_detected) = false;
+          }
+  - interval: 500ms
+    then:
+      - lambda: |-
+          // Radar alive heartbeat: if UART is receiving bytes, the sensor is alive
+          if (id(uart_bytes_pending) > 0) {
+            id(rd03_last_seen_ms) = millis();
+          }
+            
+          
+
+
+
+
+sensor:  
+  - platform: template
+    name: "RD03 UART buffer pending"
+    id: rd03_uart_bytes_pending
+    unit_of_measurement: "bytes"
+    icon: "mdi:memory"
+    lambda: |-
+      return (float) id(uart_bytes_pending);
+    update_interval: 2s
+
+  - platform: template
+    name: "RD03 UART loop time"
+    id: rd03_uart_loop_ms
+    unit_of_measurement: "ms"
+    icon: "mdi:timer-outline"
+    lambda: |-
+      return (float) id(uart_loop_ms);
+    update_interval: 5s
+
+  - platform: template
+    name: "RD03 frames parsed"
+    id: rd03_frames_parsed
+    icon: "mdi:counter"
+    lambda: |-
+      return (float) id(uart_frames_parsed);
+    update_interval: 10s
+
+  - platform: template
+    name: "RD03 frames bad"
+    id: rd03_frames_bad
+    icon: "mdi:alert-circle-outline"
+    lambda: |-
+      return (float) id(uart_frames_bad);
+    update_interval: 10s
+
+  - platform: template
+    name: "RD-03D Target Count"
+    lambda: 'return id(target_count);'
+  - platform: template
+    name: "RD-03D Nearest Distance"
+    unit_of_measurement: "m"
+    lambda: 'return id(nearest_m);'
+# Optional virtual lux; replace with a real sensor if available
+
+  - platform: template
+    name: "Illuminance"
+    id: epl_illuminance
+    unit_of_measurement: "lx"
+    device_class: illuminance
+    state_class: measurement
+    lambda: |-
+      float d = id(nearest_m);
+      if (isnanf(d) || d <= 0) return 0.0f;
+      return 100.0f / (d*d);
+    update_interval: 2s
+# Target aliases under EPL-style names
+
+  # --- EPL Target aliases ---
+  - platform: template
+    name: "Target 1 Distance"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t1_detected)? id(t1_dist_m): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 1 Speed"
+    unit_of_measurement: "m/s"
+    accuracy_decimals: 2
+    lambda: 'return id(t1_detected)? id(t1_speed_mps): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 1 Angle"
+    unit_of_measurement: "°"
+    accuracy_decimals: 1
+    lambda: 'return id(t1_detected)? id(t1_angle_deg): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 1 X"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t1_detected)? id(t1_x_m): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 1 Y"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t1_detected)? id(t1_y_m): NAN;'
+    update_interval: 1s
+
+  - platform: template
+    name: "Target 2 Distance"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t2_detected)? id(t2_dist_m): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 2 Speed"
+    unit_of_measurement: "m/s"
+    accuracy_decimals: 2
+    lambda: 'return id(t2_detected)? id(t2_speed_mps): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 2 Angle"
+    unit_of_measurement: "°"
+    accuracy_decimals: 1
+    lambda: 'return id(t2_detected)? id(t2_angle_deg): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 2 X"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t2_detected)? id(t2_x_m): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 2 Y"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t2_detected)? id(t2_y_m): NAN;'
+    update_interval: 1s
+
+  - platform: template
+    name: "Target 3 Distance"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t3_detected)? id(t3_dist_m): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 3 Speed"
+    unit_of_measurement: "m/s"
+    accuracy_decimals: 2
+    lambda: 'return id(t3_detected)? id(t3_speed_mps): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 3 Angle"
+    unit_of_measurement: "°"
+    accuracy_decimals: 1
+    lambda: 'return id(t3_detected)? id(t3_angle_deg): NAN;'
+    update_interval: 1s
+  - platform: template
+    name: "Target 3 X"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t3_detected)? id(t3_x_m): NAN;'
+    update_interval: 1s
+    
+  - platform: template
+    name: "Target 3 Y"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: 'return id(t3_detected)? id(t3_y_m): NAN;'
+    update_interval: 1s
+
+  - platform: template
+    name: "DBG xs (sensor)"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(dbg_xs);
+
+  - platform: template
+    name: "DBG ys (sensor)"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(dbg_ys);
+
+  - platform: template
+    name: "DBG room_x"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(dbg_room_x);
+
+  - platform: template
+    name: "DBG room_y"
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(dbg_room_y);
+
+#############################################################
+# v4 addition – reinitialize button and script
+#############################################################
+script:
+  - id: rd03_send_init
+    then:
+      - lambda: |-
+          const uint8_t OPEN_CMD[]   = {0xAA,0xFF,0x01,0x00,0x01,0x00,0x55,0xCC};
+          const uint8_t MULTI_CMD[]  = {0xFD,0xFC,0xFB,0xFA,0x02,0x00,0x90,0x00,0x04,0x03,0x02,0x01};
+          const uint8_t SINGLE_CMD[] = {0xFD,0xFC,0xFB,0xFA,0x02,0x00,0x80,0x00,0x04,0x03,0x02,0x01};
+          id(rd03_uart).write_array(OPEN_CMD, sizeof(OPEN_CMD));
+          delay(30);
+          if (id(rd03_mode).state == "Multi") {
+            id(rd03_uart).write_array(MULTI_CMD, sizeof(MULTI_CMD));
+          } else {
+            id(rd03_uart).write_array(SINGLE_CMD, sizeof(SINGLE_CMD));
+          }
+
+button:
+  - platform: template
+    name: "RD03D Reinitialize"
+    icon: "mdi:radar"
+    entity_category: config
+    on_press:
+      - script.execute: rd03_send_init
+  - platform: template
+    name: "RD03 Factory reset"
+    icon: "mdi:backup-restore"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          // Defaults you like
+          id(rd03_mode).publish_state("Single");
+          id(update_speed).publish_state("Slow");
+          id(epl_distance).publish_state(5.0f);
+          id(epl_install_angle).publish_state(0.0f);
+
+          // Zone enables / exclusions
+          id(zone_1_enable).turn_on();
+          id(zone_2_enable).turn_on();
+          id(zone_3_enable).turn_on();
+          id(zone_4_enable).turn_on();
+          // if you add exclusion switches later, also turn them off here
+
+          // Let HA repush room geometry; we don’t hard-code it here.
+
+
+switch:
+  - platform: template
+    name: "Zone 1 Enable"
+    id: zone_1_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Zone 2 Enable"
+    id: zone_2_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Zone 3 Enable"
+    id: zone_3_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "Zone 4 Enable"
+    id: zone_4_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # New: logical exclusion toggles
+  - platform: template
+    name: "Zone 1 Excluded"
+    id: zone_1_exclude
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  - platform: template
+    name: "Zone 2 Excluded"
+    id: zone_2_exclude
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  - platform: template
+    name: "Zone 3 Excluded"
+    id: zone_3_exclude
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  - platform: template
+    name: "Zone 4 Excluded"
+    id: zone_4_exclude
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  - platform: template
+    name: "Zones Raw Geometry Mode"
+    id: zones_raw_mode
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+  - platform: template
+    name: "Zones Hit-Test Mirror X"
+    id: zones_mirror_x
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+
+
+
+
+# === EPL Zone aliases (the names the Configurator expects) ===
+number:
+  # Zone 1 aliases
+  - platform: template
+    name: "Zone 1 Start"
+    id: z1_start
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 0.5
+    set_action:
+      - lambda: |-
+          float r = id(z1_start).state;
+          id(z1_xb).publish_state(-r);
+          id(z1_yb).publish_state(-r);
+  - platform: template
+    name: "Zone 1 End"
+    id: z1_end
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 1.0
+    set_action:
+      - lambda: |-
+          float r = id(z1_end).state;
+          id(z1_xe).publish_state(r);
+          id(z1_ye).publish_state(r);
+
+  # Zone 2 aliases
+  - platform: template
+    name: "Zone 2 Start"
+    id: z2_start
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 0.5
+    set_action:
+      - lambda: |-
+          float r = id(z2_start).state;
+          id(z2_xb).publish_state(-r);
+          id(z2_yb).publish_state(-r);
+  - platform: template
+    name: "Zone 2 End"
+    id: z2_end
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 1.0
+    set_action:
+      - lambda: |-
+          float r = id(z2_end).state;
+          id(z2_xe).publish_state(r);
+          id(z2_ye).publish_state(r);
+
+  # Zone 3 aliases
+  - platform: template
+    name: "Zone 3 Start"
+    id: z3_start
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 0.5
+    set_action:
+      - lambda: |-
+          float r = id(z3_start).state;
+          id(z3_xb).publish_state(-r);
+          id(z3_yb).publish_state(-r);
+  - platform: template
+    name: "Zone 3 End"
+    id: z3_end
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 1.0
+    set_action:
+      - lambda: |-
+          float r = id(z3_end).state;
+          id(z3_xe).publish_state(r);
+          id(z3_ye).publish_state(r);
+
+  # Zone 4 aliases
+  - platform: template
+    name: "Zone 4 Start"
+    id: z4_start
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 0.5
+    set_action:
+      - lambda: |-
+          float r = id(z4_start).state;
+          id(z4_xb).publish_state(-r);
+          id(z4_yb).publish_state(-r);
+  - platform: template
+    name: "Zone 4 End"
+    id: z4_end
+    optimistic: true
+    min_value: 0.0
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    entity_category: config
+    initial_value: 1.0
+    set_action:
+      - lambda: |-
+          float r = id(z4_end).state;
+          id(z4_xe).publish_state(r);
+          id(z4_ye).publish_state(r);
+
+
+# Zones 1–4 controls
+
+  # Zone 1
+  - platform: template
+    name: "Zone 1 X Begin"
+    id: z1_xb
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 1 Y Begin"
+    id: z1_yb
+    optimistic: true
+    min_value: 0
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 1 X End"
+    id: z1_xe
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 1 Y End"
+    id: z1_ye
+    optimistic: true
+    min_value: 0
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+
+  # Zone 2
+  - platform: template
+    name: "Zone 2 X Begin"
+    id: z2_xb
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 2 Y Begin"
+    id: z2_yb
+    optimistic: true
+    min_value: 0
+    max_value: 6
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 2 X End"
+    id: z2_xe
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 2 Y End"
+    id: z2_ye
+    optimistic: true
+    min_value: 0
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+
+  # Zone 3
+  - platform: template
+    name: "Zone 3 X Begin"
+    id: z3_xb
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 3 Y Begin"
+    id: z3_yb
+    optimistic: true
+    min_value: 0
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 3 X End"
+    id: z3_xe
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 3 Y End"
+    id: z3_ye
+    optimistic: true
+    min_value: 0
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+
+  # Zone 4
+  - platform: template
+    name: "Zone 4 X Begin"
+    id: z4_xb
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 4 Y Begin"
+    id: z4_yb
+    optimistic: true
+    min_value: 0
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 4 X End"
+    id: z4_xe
+    optimistic: true
+    min_value: -8
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+  - platform: template
+    name: "Zone 4 Y End"
+    id: z4_ye
+    optimistic: true
+    min_value: 0
+    max_value: 8
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 0
+    entity_category: config
+    
+  - platform: template
+    name: "Distance"
+    id: epl_distance
+    optimistic: true
+    min_value: 0.5
+    max_value: 8.0
+    step: 0.1
+    restore_value: true
+    unit_of_measurement: "m"
+    initial_value: 6.0
+    mode: slider
+    entity_category: config
+
+  - platform: template
+    name: "Occupancy Off Delay"
+    id: epl_off_delay
+    optimistic: true
+    min_value: 0
+    max_value: 300
+    step: 1
+    restore_value: true
+    unit_of_measurement: "s"
+    initial_value: 15
+    mode: slider
+    entity_category: config
+
+  - platform: template
+    name: "Installation Angle"
+    id: epl_install_angle
+    optimistic: true
+    min_value: -90
+    max_value: 90
+    step: 1
+    restore_value: true
+    unit_of_measurement: "°"
+    initial_value: 0
+    mode: slider
+    entity_category: config
+ 
+
+
+#############################################################
+# === Everything Presence Lite (EPL) Compatibility Layer v4.2 ===
+#############################################################
+
+# Global controls expected by the configurator
+
+
+#############################################################
+# Base presence/telemetry
+#############################################################
+binary_sensor:
+  - platform: template
+    name: "EPL Occupancy"
+    id: epl_occupancy
+    device_class: occupancy
+    lambda: |-
+      const uint32_t now = millis();
+      const uint32_t age = now - id(last_seen_ms);
+      return id(last_seen_ms) != 0 &&
+       age < (uint32_t)(id(epl_off_delay).state * 1000.0f); 
+
+    # update_interval: 0.5s   <-- REMOVE this line
+    # optional smoothing:
+    filters:
+     - delayed_off: 500ms
+
+  - platform: template
+    name: "Zone 1 In Zone"
+    device_class: occupancy
+    lambda: |-
+      if (!id(zone_1_enable).state) return false;
+      if (id(zone_1_exclude).state) return false;
+
+      const float gate = id(epl_distance).state;
+      const float xb = id(z1_xb).state;
+      const float yb = id(z1_yb).state;
+      const float xe = id(z1_xe).state;
+      const float ye = id(z1_ye).state;
+
+      auto in_rect = [&](float x, float y,
+                         float xb, float yb,
+                         float xe, float ye) -> bool {
+        if (!std::isfinite(x) || !std::isfinite(y)) return false;
+        if (xb > xe) std::swap(xb, xe);
+        if (yb > ye) std::swap(yb, ye);
+        return (x >= xb && x <= xe && y >= yb && y <= ye);
+      };
+      
+
+      bool hit = false;      
+
+      if (id(t1_detected) && in_rect(id(t1_x_m), id(t1_y_m), xb, yb, xe, ye))
+      {
+        hit = true;
+      }
+      if (!hit && id(t2_detected) && in_rect(id(t2_x_m), id(t2_y_m), xb, yb, xe, ye))
+      {
+        hit = true;
+      }
+
+      if (!hit && id(t3_detected) && in_rect(id(t3_x_m), id(t3_y_m), xb, yb, xe, ye))
+      {
+        hit = true;
+      }    
+
+      if (hit) {
+        id(z1_last_hit_ms) = millis();
+      }
+
+      // RAW geometry mode — no hysteresis, no smoothing
+      if (id(zones_raw_mode).state) {
+        return hit;
+      }
+
+      // Normal hysteresis behaviour
+      const uint32_t age = millis() - id(z1_last_hit_ms);
+
+      return hit || (id(z1_last_hit_ms) != 0 && age < (uint32_t)(id(epl_off_delay).state * 1000.0f));
+
+  - platform: template
+    name: "Zone 2 In Zone"
+    device_class: occupancy
+    
+    lambda: |-
+      if (!id(zone_2_enable).state) return false;
+      if (id(zone_2_exclude).state) return false;
+
+      const float gate = id(epl_distance).state;
+      const float xb = id(z2_xb).state;
+      const float yb = id(z2_yb).state;
+      const float xe = id(z2_xe).state;
+      const float ye = id(z2_ye).state;
+
+      auto in_rect = [&](float x, float y,
+                         float xb, float yb,
+                         float xe, float ye) -> bool {
+        if (!std::isfinite(x) || !std::isfinite(y)) return false;
+        if (xb > xe) std::swap(xb, xe);
+        if (yb > ye) std::swap(yb, ye);
+        return (x >= xb && x <= xe && y >= yb && y <= ye);
+      };
+
+      bool hit = false;
+
+      if (id(t1_detected)) {
+        float d = id(t1_dist_m);
+        if (in_rect(id(t1_x_m), id(t1_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (!hit && id(t2_detected)) {
+        float d = id(t2_dist_m);
+        if  (in_rect(id(t2_x_m), id(t2_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (!hit && id(t3_detected)) {
+        float d = id(t3_dist_m);
+        if (in_rect(id(t3_x_m), id(t3_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (hit) {
+        id(z2_last_hit_ms) = millis();
+      }
+
+      // RAW geometry mode
+      if (id(zones_raw_mode).state) {
+        return hit;
+      }
+
+      // Hysteresis
+      const uint32_t age = millis() - id(z2_last_hit_ms);
+      return hit ||
+            (id(z2_last_hit_ms) != 0 &&
+              age < (uint32_t)(id(epl_off_delay).state * 1000.0f));
+
+
+  - platform: template
+    name: "Zone 3 In Zone"
+    device_class: occupancy
+    
+    lambda: |-
+      if (!id(zone_3_enable).state) return false;
+      if (id(zone_3_exclude).state) return false;
+
+      const float gate = id(epl_distance).state;
+      const float xb = id(z3_xb).state;
+      const float yb = id(z3_yb).state;
+      const float xe = id(z3_xe).state;
+      const float ye = id(z3_ye).state;
+
+      auto in_rect = [&](float x, float y,
+                         float xb, float yb,
+                         float xe, float ye) -> bool {
+        if (!std::isfinite(x) || !std::isfinite(y)) return false;
+        if (xb > xe) std::swap(xb, xe);
+        if (yb > ye) std::swap(yb, ye);
+        return (x >= xb && x <= xe && y >= yb && y <= ye);
+      };
+
+      bool hit = false;
+
+      if (id(t1_detected)) {
+        float d = id(t1_dist_m);
+        if (in_rect(id(t1_x_m), id(t1_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (!hit && id(t2_detected)) {
+        float d = id(t2_dist_m);
+        if (in_rect(id(t2_x_m), id(t2_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (!hit && id(t3_detected)) {
+        float d = id(t3_dist_m);
+        if (in_rect(id(t3_x_m), id(t3_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (hit) {
+        id(z3_last_hit_ms) = millis();
+      }
+
+      // RAW geometry mode
+      if (id(zones_raw_mode).state) {
+        return hit;
+      }
+
+      // Hysteresis
+      const uint32_t age = millis() - id(z3_last_hit_ms);
+      return hit ||
+            (id(z3_last_hit_ms) != 0 &&
+              age < (uint32_t)(id(epl_off_delay).state * 1000.0f));
+
+
+  - platform: template
+    name: "Zone 4 In Zone"
+    device_class: occupancy
+    
+    lambda: |-
+      if (!id(zone_4_enable).state) return false;
+      if (id(zone_4_exclude).state) return false;
+
+      const float gate = id(epl_distance).state;
+      const float xb = id(z4_xb).state;
+      const float yb = id(z4_yb).state;
+      const float xe = id(z4_xe).state;
+      const float ye = id(z4_ye).state;
+
+      auto in_rect = [&](float x, float y,
+                         float xb, float yb,
+                         float xe, float ye) -> bool {
+        if (!std::isfinite(x) || !std::isfinite(y)) return false;
+        if (xb > xe) std::swap(xb, xe);
+        if (yb > ye) std::swap(yb, ye);
+        return (x >= xb && x <= xe && y >= yb && y <= ye);
+      };
+
+      bool hit = false;
+
+      if (id(t1_detected)) {
+        float d = id(t1_dist_m);
+        if (in_rect(id(t1_x_m), id(t1_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (!hit && id(t2_detected)) {
+        float d = id(t2_dist_m);
+        if (in_rect(id(t2_x_m), id(t2_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (!hit && id(t3_detected)) {
+        float d = id(t3_dist_m);
+        if (in_rect(id(t3_x_m), id(t3_y_m), xb, yb, xe, ye))
+          hit = true;
+      }
+
+      if (hit) {
+        id(z4_last_hit_ms) = millis();
+      }
+
+      // RAW geometry mode
+      if (id(zones_raw_mode).state) {
+        return hit;
+      }
+
+      // Hysteresis
+      const uint32_t age = millis() - id(z4_last_hit_ms);
+      return hit ||
+            (id(z4_last_hit_ms) != 0 &&
+              age < (uint32_t)(id(epl_off_delay).state * 1000.0f));
+

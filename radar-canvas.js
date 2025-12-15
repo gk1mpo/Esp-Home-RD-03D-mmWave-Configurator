@@ -473,7 +473,13 @@ export class RadarCanvas {
             );
         }
         //this._ready = true;
-        this.draw();
+        // ⭐ IMPORTANT: Do NOT draw before CSS & resize are ready
+        if (this.cssReady) {
+            //this.resize();  // optional
+            this.draw();
+        } else {
+            console.log("[RadarCanvas] Waiting for CSS before first draw");
+        }
     }
     computeGeometry() {
         const w = this.canvas.clientWidth;
@@ -482,19 +488,23 @@ export class RadarCanvas {
         // Base size taken from the shorter side (normally the width)
         const base = Math.min(w, h);
 
+        // Shrink room width slightly so ruler + fan edges are more visible
+        const WIDTH_SCALE = 0.85;   // try 0.92 or 0.95 if you want more width
+
         // 5% outer margin based on base
         const margin = base * 0.05;
 
-        // Square room fitted to the base, with side L
-        const L = base - margin * 2;
+        // Square room fitted to the base, with side L — but narrower by WIDTH_SCALE
+        const L = (base - margin * 2) * WIDTH_SCALE;
 
-        // Center horizontally, anchor near the top to leave band underneath
+        // Center horizontally, anchor near the top
         const offsetX = (w - L) / 2;
-        const roomY = margin; // TOP-anchored room, not vertically centered
+        const roomY = margin;
 
         const room = { x: offsetX, y: roomY, size: L };
+        this.room = room;
 
-        // Clamp θ to [-π/4, +π/4]
+        // Clamp θ
         const theta = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, this.theta));
 
         // Linear slide of the origin along the top edge
@@ -512,17 +522,17 @@ export class RadarCanvas {
 
         const handlePadding = 12;
 
-        // Angle handle: just above the origin
+        // Angle handle
         const angleX = origin.x;
         const angleY = room.y - handlePadding;
 
-        // Range handle: slide along vertical ruler according to range
-        const RANGE_MAX = 8; // hard clamp used in range dragging
+        // Range handle
+        const RANGE_MAX = 8;
         const currentRange = this.maxRange ?? RANGE_MAX;
-        const t = Math.min(Math.max(currentRange / RANGE_MAX, 0), 1); // 0..1
+        const t = Math.min(Math.max(currentRange / RANGE_MAX, 0), 1);
 
         const rangeX = room.x + room.size + handlePadding;
-        const rangeY = room.y + (1 - t) * room.size;  // 8m = top, 0m = bottom
+        const rangeY = room.y + (1 - t) * room.size;
 
         return {
             canvas: { w, h },
@@ -538,9 +548,19 @@ export class RadarCanvas {
                 range: { x: rangeX, y: rangeY }
             },
             toCanvas: (x, y) => this.worldToCanvas(x, y),
-            toWorld: (px, py) => this.canvasToWorld(px, py)
+            toWorld: (px, py) => this.canvasToWorld(px, py),
+            roomToCanvas: (x, y) => this.roomToCanvas(x, y)
+
         };
     }
+    roomToCanvas(x, y) {
+        return {
+            x: this.room.x + x * this.SCALE,
+            y: this.room.y + y * this.SCALE
+        };
+    }
+
+
 
 
 
@@ -788,10 +808,21 @@ export class RadarCanvas {
             const base = palette[id] || defaultColours;
 
             // Occupied just boosts the alpha slightly
+            //const fill = z.occupied
+            //    ? base.fill.replace(/0\\.15|0\\.10|0\\.22/, '0.35')
+            //   : base.fill;
+
             const fill = z.occupied
-                ? base.fill.replace(/0\\.15|0\\.10|0\\.22/, '0.35')
+                ? base.fill.replace(/0\.\d+/, '0.45')
                 : base.fill;
             const stroke = base.stroke;
+            if (z.occupied) {
+                ctx.save();
+                ctx.shadowColor = base.stroke;
+                ctx.shadowBlur = 12;
+                ctx.strokeRect(x, y, w, h);
+                ctx.restore();
+            }
 
             ctx.fillStyle = fill;
             ctx.strokeStyle = stroke;
@@ -831,9 +862,17 @@ export class RadarCanvas {
 
 
     drawTargets(ctx, params) {
-        function radarToCanvas(x_m, y_m, params) {
+        /*function radarToCanvas(x_m, y_m, params) {
             // Forward (front of radar) is +Y in human terms → -Y in transform
             return params.toCanvas(x_m, -y_m);
+        }*/
+
+        function roomToCanvas(x, y, params, SCALE) {
+
+            return {
+                x: params.origin.x + x * SCALE,
+                y: params.origin.y + y * SCALE
+            };
         }
         const { targets, toCanvas } = params;
         if (!targets) return;
@@ -848,7 +887,28 @@ export class RadarCanvas {
 
             // Expect target.x/y in metres relative to radar (fan) origin
             const { x, y, intensity = 1.0 } = t;
-            const p = radarToCanvas(t.x, t.y, params);   // ⬅ same call the fan uses
+
+            // Recompute sensor_x exactly like ESPHome (SLIDING SENSOR POSITION)
+            const R = params.range_m;           // must be provided (same as epl_distance)
+            const angleDeg = params.angle_deg;  // must be provided (same as epl_install_angle)
+
+            // Map [-45,+45] → [0,1]
+            let t01 = (angleDeg + 45) / 90;
+            t01 = Math.max(0, Math.min(1, t01));
+
+            const sensor_x = t01 * R;
+            const sensor_y = 0;
+
+            // Convert ROOM → RADAR (relative to sensor origin)
+            const xr = t.x - sensor_x;
+            const yr = t.y - sensor_y;
+
+            // Feed radar-space into existing transform.
+            // If your screen Y grows downward, keep yr as-is.
+            // If it’s still flipped 180°, change yr to (-yr) here.
+            //const p = params.toCanvas(xr, -yr);
+            // const p = params.toCanvas(1, -0.5);
+            const p = params.roomToCanvas(t.x, t.y); // no rotation for targets
 
             const r = 5;
             const alpha = Math.min(Math.max(intensity, 0.2), 1);
@@ -865,6 +925,12 @@ export class RadarCanvas {
 
             ctx.fillStyle = 'black';
             ctx.fillText(`T${id}`, p.x + r + 2, p.y);
+            console.log(
+                "[drawTargets]",
+                "range=", params.range_m,
+                "angle=", params.angle_deg,
+                "target=", t.x, t.y
+            );
         }
 
         ctx.restore();
@@ -1040,6 +1106,7 @@ export class RadarCanvas {
     }
 
     draw() {
+        if (!this.cssReady) return;
         if (!this.isReady()) {
             console.warn("[RadarCanvas] draw() skipped — data not ready.", {
                 ready: this._ready,
@@ -1121,6 +1188,11 @@ export class RadarCanvas {
     }
 
     resize() {
+        if (!this.cssReady) {
+            console.log("[RadarCanvas.resize] blocked until CSS ready");
+            return;
+        }
+
         console.groupCollapsed(
             "%c[RadarCanvas.resize]",
             "color:#fa0;font-weight:bold;"
@@ -1153,18 +1225,10 @@ export class RadarCanvas {
 
         const dpr = window.devicePixelRatio || 1;
 
-        // --- RECTANGULAR CANVAS WITH BOTTOM BAND ---
-        // We still keep the concept of a "reserved" band for controls,
-        // but the canvas itself is now allowed to be taller than it is wide.
-        const TOOLBAR_RESERVE = 80; // target extra height for toolbar inside canvas
-
-        // Width is locked to wrapper width
+        // ✅ Width & height come directly from wrapper.
+        //    NO TOOLBAR_RESERVE, NO wrapper.style.height here.
         const cssWidth = rect.width;
-
-        // Ideal height = square room (cssWidth) + extra toolbar band.
-        // Clamp to wrapper height so we never overflow the card.
-        const idealHeight = cssWidth + TOOLBAR_RESERVE;
-        const cssHeight = Math.min(rect.height, idealHeight);
+        const cssHeight = rect.height;
 
         // CSS size
         this.canvas.style.width = `${cssWidth}px`;
@@ -1180,21 +1244,23 @@ export class RadarCanvas {
         this._width = cssWidth;
         this._height = cssHeight;
 
-        console.log("[RadarCanvas.resize] canvas CSS size:", {
-            cssWidth,
-            cssHeight,
-            bufferWidth: this.canvas.width,
-            bufferHeight: this.canvas.height
-        });
-
-        // Recompute SCALE, origin, geometry and redraw
         this.updateScaleGeometry();
-        this._updateToolbarVisibility?.();
-        this.draw();
+
+        if (this.isReady()) {
+            console.log("[RadarCanvas.resize] canvas CSS size:", {
+                cssWidth,
+                cssHeight,
+                bufferWidth: this.canvas.width,
+                bufferHeight: this.canvas.height
+            });
+
+            this._updateToolbarVisibility?.();
+            this.draw();
+        }
 
         console.groupEnd();
-
     }
+
 
 
     highlightZone(zoneNum) {
@@ -1801,6 +1867,12 @@ export class RadarCanvas {
                 console.warn("Pointer capture failed:", e);
             }
             this._suppressModelSync = true;   // freeze HA sync while dragging range
+            if (this.card) {
+                this.card.draging = true;
+                console.log("[RC] PointerDown this.card.draging:", this);
+                this.model.silentUpdate = true;
+
+            };
             if (this.card) this.card._suppressModelSync = true;
             return;
         }

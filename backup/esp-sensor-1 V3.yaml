@@ -12,7 +12,7 @@ esphome:
   project:
     name: everythingsmarthome.everything_presence_lite
     version: "4.2"
-  
+
   on_boot:
     priority: 600
     then:
@@ -85,7 +85,7 @@ select:
     name: "RD-03D Update Speed"
     id: update_speed
     optimistic: true
-    options: [ "Slow", "Medium", "Fast" ]
+    options: ["Slow", "Medium", "Fast"]
     initial_option: "Slow"
 
   - platform: template
@@ -93,7 +93,7 @@ select:
     id: rd03_mode
     optimistic: true
     restore_value: true
-    options: [ "Multi", "Single" ]
+    options: ["Multi", "Single"]
     initial_option: "Multi"
     set_action:
       - lambda: |-
@@ -118,25 +118,25 @@ globals:
   - { id: target_count, type: int, initial_value: "0" }
   - { id: nearest_m, type: float, initial_value: "0.0" }
 
-  - { id: t1_detected,  type: bool,  initial_value: "false" }
-  - { id: t1_x_m,       type: float, initial_value: "0.0" }
-  - { id: t1_y_m,       type: float, initial_value: "0.0" }
+  - { id: t1_detected, type: bool, initial_value: "false" }
+  - { id: t1_x_m, type: float, initial_value: "0.0" }
+  - { id: t1_y_m, type: float, initial_value: "0.0" }
   - { id: t1_speed_mps, type: float, initial_value: "0.0" }
-  - { id: t1_dist_m,    type: float, initial_value: "0.0" }
+  - { id: t1_dist_m, type: float, initial_value: "0.0" }
   - { id: t1_angle_deg, type: float, initial_value: "0.0" }
 
-  - { id: t2_detected,  type: bool,  initial_value: "false" }
-  - { id: t2_x_m,       type: float, initial_value: "0.0" }
-  - { id: t2_y_m,       type: float, initial_value: "0.0" }
+  - { id: t2_detected, type: bool, initial_value: "false" }
+  - { id: t2_x_m, type: float, initial_value: "0.0" }
+  - { id: t2_y_m, type: float, initial_value: "0.0" }
   - { id: t2_speed_mps, type: float, initial_value: "0.0" }
-  - { id: t2_dist_m,    type: float, initial_value: "0.0" }
+  - { id: t2_dist_m, type: float, initial_value: "0.0" }
   - { id: t2_angle_deg, type: float, initial_value: "0.0" }
 
-  - { id: t3_detected,  type: bool,  initial_value: "false" }
-  - { id: t3_x_m,       type: float, initial_value: "0.0" }
-  - { id: t3_y_m,       type: float, initial_value: "0.0" }
+  - { id: t3_detected, type: bool, initial_value: "false" }
+  - { id: t3_x_m, type: float, initial_value: "0.0" }
+  - { id: t3_y_m, type: float, initial_value: "0.0" }
   - { id: t3_speed_mps, type: float, initial_value: "0.0" }
-  - { id: t3_dist_m,    type: float, initial_value: "0.0" }
+  - { id: t3_dist_m, type: float, initial_value: "0.0" }
   - { id: t3_angle_deg, type: float, initial_value: "0.0" }
 
 #############################################################
@@ -207,7 +207,6 @@ interval:
               };
               handle(4,1); handle(12,2); handle(20,3);
               if (id(target_count)>0) id(last_seen_ms)=millis();
-
             } else { // have14
               std::vector<uint8_t> f(acc.begin(), acc.begin()+14);
               acc.erase(acc.begin(), acc.begin()+14);
@@ -217,25 +216,28 @@ interval:
               if (det) {
                 float x=xmm/1000.0f, y=ymm/1000.0f, v=vcm/100.0f;
                 float d=sqrtf(x*x+y*y);
-                const float PI=3.14159265f; float ang=atan2f(y,x)*180.0f/PI;
+                const float PI = 3.14159265f;
+                float ang = atan2f(y, x) * 180.0f / PI;
+                float install_offset = id(epl_install_angle).state;
+                ang += install_offset;
+                if (ang > 180.0f)  ang -= 360.0f;
+                if (ang < -180.0f) ang += 360.0f;
+                
                 id(t1_detected)=true; id(t1_x_m)=x; id(t1_y_m)=y; id(t1_speed_mps)=v; id(t1_dist_m)=d; id(t1_angle_deg)=ang;
                 id(target_count)=1; id(nearest_m)=d; id(last_seen_ms)=millis();
               }
             }
           }
 
-
-
-
 sensor:
   - platform: template
     name: "RD-03D Target Count"
-    lambda: 'return id(target_count);'
+    lambda: "return id(target_count);"
   - platform: template
     name: "RD-03D Nearest Distance"
     unit_of_measurement: "m"
-    lambda: 'return id(nearest_m);'
-# Optional virtual lux; replace with a real sensor if available
+    lambda: "return id(nearest_m);"
+  # Optional virtual lux; replace with a real sensor if available
 
   - platform: template
     name: "Illuminance"
@@ -248,100 +250,100 @@ sensor:
       if (isnanf(d) || d <= 0) return 0.0f;
       return 100.0f / (d*d);
     update_interval: 2s
-# Target aliases under EPL-style names
+  # Target aliases under EPL-style names
 
   # --- EPL Target aliases ---
   - platform: template
     name: "Target 1 Distance"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t1_detected)? id(t1_dist_m): NAN;'
+    lambda: "return id(t1_detected)? id(t1_dist_m): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 1 Speed"
     unit_of_measurement: "m/s"
     accuracy_decimals: 2
-    lambda: 'return id(t1_detected)? id(t1_speed_mps): NAN;'
+    lambda: "return id(t1_detected)? id(t1_speed_mps): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 1 Angle"
     unit_of_measurement: "°"
     accuracy_decimals: 1
-    lambda: 'return id(t1_detected)? id(t1_angle_deg): NAN;'
+    lambda: "return id(t1_detected)? id(t1_angle_deg): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 1 X"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t1_detected)? id(t1_x_m): NAN;'
+    lambda: "return id(t1_detected)? id(t1_x_m): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 1 Y"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t1_detected)? id(t1_y_m): NAN;'
+    lambda: "return id(t1_detected)? id(t1_y_m): NAN;"
     update_interval: 1s
 
   - platform: template
     name: "Target 2 Distance"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t2_detected)? id(t2_dist_m): NAN;'
+    lambda: "return id(t2_detected)? id(t2_dist_m): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 2 Speed"
     unit_of_measurement: "m/s"
     accuracy_decimals: 2
-    lambda: 'return id(t2_detected)? id(t2_speed_mps): NAN;'
+    lambda: "return id(t2_detected)? id(t2_speed_mps): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 2 Angle"
     unit_of_measurement: "°"
     accuracy_decimals: 1
-    lambda: 'return id(t2_detected)? id(t2_angle_deg): NAN;'
+    lambda: "return id(t2_detected)? id(t2_angle_deg): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 2 X"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t2_detected)? id(t2_x_m): NAN;'
+    lambda: "return id(t2_detected)? id(t2_x_m): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 2 Y"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t2_detected)? id(t2_y_m): NAN;'
+    lambda: "return id(t2_detected)? id(t2_y_m): NAN;"
     update_interval: 1s
 
   - platform: template
     name: "Target 3 Distance"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t3_detected)? id(t3_dist_m): NAN;'
+    lambda: "return id(t3_detected)? id(t3_dist_m): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 3 Speed"
     unit_of_measurement: "m/s"
     accuracy_decimals: 2
-    lambda: 'return id(t3_detected)? id(t3_speed_mps): NAN;'
+    lambda: "return id(t3_detected)? id(t3_speed_mps): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 3 Angle"
     unit_of_measurement: "°"
     accuracy_decimals: 1
-    lambda: 'return id(t3_detected)? id(t3_angle_deg): NAN;'
+    lambda: "return id(t3_detected)? id(t3_angle_deg): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 3 X"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t3_detected)? id(t3_x_m): NAN;'
+    lambda: "return id(t3_detected)? id(t3_x_m): NAN;"
     update_interval: 1s
   - platform: template
     name: "Target 3 Y"
     unit_of_measurement: "m"
     accuracy_decimals: 2
-    lambda: 'return id(t3_detected)? id(t3_y_m): NAN;'
+    lambda: "return id(t3_detected)? id(t3_y_m): NAN;"
     update_interval: 1s
 
 #############################################################
@@ -369,7 +371,6 @@ button:
     entity_category: config
     on_press:
       - script.execute: rd03_send_init
-
 
 switch:
   - platform: template
@@ -402,8 +403,6 @@ switch:
     id: exclusion_2_enable
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
-
-
 
 # === EPL Zone aliases (the names the Configurator expects) ===
 number:
@@ -535,49 +534,48 @@ number:
           id(z4_xe).publish_state(r);
           id(z4_ye).publish_state(r);
 
-
-# Zones 1–4 controls
+  # Zones 1–4 controls
 
   # Zone 1
   - platform: template
     name: "Zone 1 X Begin"
     id: z1_xb
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 1 Y Begin"
     id: z1_yb
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 1 X End"
     id: z1_xe
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 1 Y End"
     id: z1_ye
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
 
   # Zone 2
@@ -585,41 +583,41 @@ number:
     name: "Zone 2 X Begin"
     id: z2_xb
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 2 Y Begin"
     id: z2_yb
     optimistic: true
-    min_value: -6
+    min_value: 0
     max_value: 6
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 2 X End"
     id: z2_xe
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 2 Y End"
     id: z2_ye
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
 
   # Zone 3
@@ -627,41 +625,41 @@ number:
     name: "Zone 3 X Begin"
     id: z3_xb
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 3 Y Begin"
     id: z3_yb
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 3 X End"
     id: z3_xe
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 3 Y End"
     id: z3_ye
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
 
   # Zone 4
@@ -669,43 +667,43 @@ number:
     name: "Zone 4 X Begin"
     id: z4_xb
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 4 Y Begin"
     id: z4_yb
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: -1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 4 X End"
     id: z4_xe
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: -8
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
   - platform: template
     name: "Zone 4 Y End"
     id: z4_ye
     optimistic: true
-    min_value: -6
-    max_value: 6
+    min_value: 0
+    max_value: 8
     step: 0.1
     unit_of_measurement: "m"
-    initial_value: 1.0
+    initial_value: 0
     entity_category: config
-    
+
   - platform: template
     name: "Distance"
     id: epl_distance
@@ -742,14 +740,11 @@ number:
     mode: slider
     entity_category: config
 
-
-
 #############################################################
 # === Everything Presence Lite (EPL) Compatibility Layer v4.2 ===
 #############################################################
 
 # Global controls expected by the configurator
-
 
 #############################################################
 # Base presence/telemetry
@@ -772,7 +767,7 @@ binary_sensor:
   - platform: template
     name: "Zone 1 In Zone"
     device_class: occupancy
-    
+
     lambda: |-
       auto in_rect = [&](float x, float y, float xb, float yb, float xe, float ye)->bool {
         if (isnanf(x) || isnanf(y)) return false;
@@ -790,7 +785,7 @@ binary_sensor:
   - platform: template
     name: "Zone 2 In Zone"
     device_class: occupancy
-    
+
     lambda: |-
       auto in_rect = [&](float x, float y, float xb, float yb, float xe, float ye)->bool {
         if (isnanf(x) || isnanf(y)) return false;
@@ -808,7 +803,7 @@ binary_sensor:
   - platform: template
     name: "Zone 3 In Zone"
     device_class: occupancy
-    
+
     lambda: |-
       auto in_rect = [&](float x, float y, float xb, float yb, float xe, float ye)->bool {
         if (isnanf(x) || isnanf(y)) return false;
@@ -826,7 +821,7 @@ binary_sensor:
   - platform: template
     name: "Zone 4 In Zone"
     device_class: occupancy
-    
+
     lambda: |-
       auto in_rect = [&](float x, float y, float xb, float yb, float xe, float ye)->bool {
         if (isnanf(x) || isnanf(y)) return false;

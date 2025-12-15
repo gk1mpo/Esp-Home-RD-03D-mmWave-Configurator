@@ -15,21 +15,7 @@
   padding-bottom: 12px;
 }
 
-/* Wrapper controlling the canvas area */
-.canvas-wrapper {
-  width: 100%;
-  max-width: 100%;
 
-  /* Critical for stable layout */
-  min-height: 420px;
-
-  display: flex;
-  justify-content: center;
-  align-items: center;
-
-  position: relative;
-  box-sizing: border-box;
-}
 
 /* The canvas itself */
 #visualizationCanvas {
@@ -142,28 +128,9 @@
   width: 100%;
 }
 
-.canvas-wrapper {
-  width: min(90vw, 600px);
-  /* control width only */
-  height: auto;
-  /* allow vertical expansion */
-  aspect-ratio: 1 / 1;
-  /* enforce square canvas area */
-  position: relative;
-  margin: 0 auto;
-  /* center horizontally */
-}
 
-/* Canvas wrapper vertical padding fix */
-.epz-canvas-cell {
-  position: relative;
-  width: 100%;
-  padding-bottom: 120%;
-  /* 100% = square, 120% = square + toolbar space */
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
+
+
 
 .epz-canvas-cell canvas {
   position: absolute;
@@ -171,4 +138,99 @@
   left: 0;
   width: 100% !important;
   height: 100% !important;
+}
+
+.epz-menu-button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 4px;
+}
+
+.epz-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.epz-dialog-backdrop[hidden] {
+  display: none;
+}
+
+.epz-dialog {
+  min-width: 280px;
+  max-width: 360px;
+  background: var(--card-background-color, #fff);
+  color: var(--primary-text-color, #111);
+  border-radius: 12px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.epz-dialog h3 {
+  margin: 0 0 12px 0;
+  font-size: 1.1rem;
+}
+
+.epz-dialog-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.epz-dialog-row label,
+.epz-dialog-row span {
+  font-size: 0.9rem;
+}
+
+.epz-dialog-row select {
+  flex: 1;
+}
+
+.epz-dialog-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.epz-dialog-buttons button {
+  border-radius: 4px;
+  border: none;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.epz-dialog-buttons .epz-dialog-cancel {
+  background: transparent;
+  color: var(--secondary-text-color, #666);
+}
+
+.epz-dialog-buttons .epz-dialog-save {
+  background: var(--primary-color, #03a9f4);
+  color: #fff;
+}
+
+.epz-container .canvas-wrapper {
+  width: 100%;
+  aspect-ratio: 1 / 1.2;
+  /* or 1 / 1.35, 1 / 1.4 etc. */
+  position: relative;
+  display: block;
+  margin: 0 auto;
+}
+
+#visualizationCanvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
 }

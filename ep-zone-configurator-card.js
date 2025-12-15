@@ -172,26 +172,33 @@ class EPZoneConfiguratorCard extends HTMLElement {
     }
   }
   _loadStyles() {
-    // Only load once
+
     if (this._stylesLoaded) return;
     this._stylesLoaded = true;
 
     fetch('/local/Esp-Home-RD-03D-mmWave-Configurator/styles.css')
       .then(r => r.text())
       .then(css => {
-        if (!this.shadowRoot) {
-          console.error("EPZ: shadowRoot missing when loading styles");
-          return;
-        }
-
         const style = document.createElement('style');
         style.textContent = css;
         this.shadowRoot.appendChild(style);
 
         console.log("EPZ: styles loaded successfully");
+
+        // ⭐ NEW: Trigger resize only after CSS loads
+        requestAnimationFrame(() => {
+          if (this.radarCanvas) {
+            console.log("EPZ: CSS ready → running first resize()");
+            this.radarCanvas.cssReady = true;
+            this.radarCanvas.resize();
+          }
+        });
+
+
       })
       .catch(err => console.error("EPZ: Failed to load CSS:", err));
   }
+
   connectedCallback() {
     //super.connectedCallback();
     this._loadStyles();   // <-- ADD THIS
@@ -210,35 +217,98 @@ class EPZoneConfiguratorCard extends HTMLElement {
     container.classList.add("epz-container");
 
     container.innerHTML = `
-      <div class="epz-container">
-      <h2 class="epz-title">Everything Presence Zone Configurator</h2>
+       <header class="header">
+    <h2>Everything Presence Zone Configurator</h2>
+    <button class="epz-menu-button" title="Device options">⋮</button>
+  </header>
 
-      <div class="epz-canvas-cell">
-        <canvas id="visualizationCanvas"></canvas>
+  <div class="device-line">
+    <select class="device-select"></select>
+    <span class="status-text"></span>
+  </div>
+
+  <div class="canvas-center">
+    <div class="canvas-wrapper">
+      <canvas id="visualizationCanvas"></canvas>
+    </div>
+  </div>
+
+  <div class="epz-toolbar-area"></div>
+
+  <div class="epz-dialog-backdrop" hidden>
+    <div class="epz-dialog">
+      <h3>Device options</h3>
+      <div class="epz-dialog-row">
+        <label for="epz-mode-select">Target mode</label>
+        <select id="epz-mode-select">
+          <option value="Multi">Multi target</option>
+          <option value="Single">Single target</option>
+        </select>
       </div>
-
-      <div class="epz-toolbar-area">
-        <select class="device-select"></select>
-        <span class="status-text"></span>
+      <div class="epz-dialog-row">
+        <label for="epz-speed-select">Update speed</label>
+        <select id="epz-speed-select">
+          <option value="Slow">Slow</option>
+          <option value="Medium">Medium</option>
+          <option value="Fast">Fast</option>
+        </select>
       </div>
-
-     </div>
-     `;
+      <div class="epz-dialog-row">
+        <span>Exclusion zone 1</span>
+        <input type="checkbox" id="epz-excl1-toggle" />
+      </div>
+      <div class="epz-dialog-row">
+        <span>Exclusion zone 2</span>
+        <input type="checkbox" id="epz-excl2-toggle" />
+      </div>
+      <div class="epz-dialog-buttons">
+        <button class="epz-dialog-cancel">Cancel</button>
+        <button class="epz-dialog-save">Apply</button>
+      </div>
+    </div>
+  </div>
+`;
 
     // Attach to shadow DOM
     this.shadowRoot.append(container);
 
+
     // Store references
     this.canvas = this.shadowRoot.querySelector("#visualizationCanvas");
+    this.canvasWrapper = this.shadowRoot.querySelector(".canvas-wrapper");
+    this.toolbarArea = this.shadowRoot.querySelector(".epz-toolbar-area");
+    this.zoneList = this.shadowRoot.querySelector("#zone-tiles");
+    this.menuButton = this.shadowRoot.querySelector(".epz-menu-button");
+    this.dialogBackdrop = this.shadowRoot.querySelector(".epz-dialog-backdrop");
+    this.dialogModeSelect = this.shadowRoot.querySelector("#epz-mode-select");
+    this.dialogSpeedSelect = this.shadowRoot.querySelector("#epz-speed-select");
+    this.dialogExcl1Toggle = this.shadowRoot.querySelector("#epz-excl1-toggle");
+    this.dialogExcl2Toggle = this.shadowRoot.querySelector("#epz-excl2-toggle");
+
+    if (this.menuButton && this.dialogBackdrop) {
+      const cancelBtn = this.shadowRoot.querySelector(".epz-dialog-cancel");
+      const saveBtn = this.shadowRoot.querySelector(".epz-dialog-save");
+
+      this.menuButton.addEventListener("click", () => this.openDeviceOptionsDialog());
+      cancelBtn?.addEventListener("click", () => this.closeDeviceOptionsDialog());
+      saveBtn?.addEventListener("click", () => this.applyDeviceOptions());
+
+      // Click on backdrop closes dialog
+      this.dialogBackdrop.addEventListener("click", (ev) => {
+        if (ev.target === this.dialogBackdrop) {
+          this.closeDeviceOptionsDialog();
+        }
+      });
+    }
 
     // Use the existing canvas cell as the wrapper
-    this.canvasWrapper = this.shadowRoot.querySelector(".epz-canvas-cell");
+    //this.canvasWrapper = this.shadowRoot.querySelector(".epz-canvas-cell");
 
 
-    this.toolbarArea = this.shadowRoot.querySelector(".epz-toolbar-area");
+    //this.toolbarArea = this.shadowRoot.querySelector(".epz-toolbar-area");
 
     // Zones sidebar no longer exists; keep this but allow null
-    this.zoneList = this.shadowRoot.querySelector("#zone-tiles");
+    //this.zoneList = this.shadowRoot.querySelector("#zone-tiles");
 
     // Initialize model + canvas
     this.radarCanvas = new RadarCanvas(this.canvas, this.model, { card: this });
@@ -286,19 +356,53 @@ class EPZoneConfiguratorCard extends HTMLElement {
       console.info("[Card] Device changed to:", this._selectedDevice);
       this.syncModelFromHA();
     };
+    // If we already have a selected device (for example from card config),
+    // keep it and sync the model.
+    if (this._selectedDevice && devices.includes(this._selectedDevice)) {
+      select.value = this._selectedDevice;
 
+      if (this.radarCanvas) {
+        this.radarCanvas.setContext({
+          hass: this._hass,
+          deviceId: this._selectedDevice,
+        });
+      }
+
+      this.syncModelFromHA();
+      return;
+    }
+
+    // Otherwise default to the first available device.
     if (!this._selectedDevice) {
       this._selectedDevice = devices[0];
       select.value = this._selectedDevice;
 
-      this.radarCanvas.setContext({
-        hass: this._hass,
-        deviceId: this._selectedDevice,
-      });
+      if (this.radarCanvas) {
+        this.radarCanvas.setContext({
+          hass: this._hass,
+          deviceId: this._selectedDevice,
+        });
+      }
 
       console.info("[Card] Auto-selected device:", this._selectedDevice);
       this.syncModelFromHA();
     }
+
+
+    /*
+        if (!this._selectedDevice) {
+          this._selectedDevice = devices[0];
+          select.value = this._selectedDevice;
+    
+          this.radarCanvas.setContext({
+            hass: this._hass,
+            deviceId: this._selectedDevice,
+          });
+    
+          console.info("[Card] Auto-selected device:", this._selectedDevice);
+          this.syncModelFromHA();
+        }
+          */
   }
 
   setDevice(deviceId) {
@@ -491,18 +595,143 @@ class EPZoneConfiguratorCard extends HTMLElement {
       container.append(tile);
     });
   }
+  openDeviceOptionsDialog() {
+    if (!this.dialogBackdrop) return;
+    this.refreshDeviceOptionsFromHA();
+    this.dialogBackdrop.hidden = false;
+  }
+
+  closeDeviceOptionsDialog() {
+    if (this.dialogBackdrop) {
+      this.dialogBackdrop.hidden = true;
+    }
+  }
+
+  refreshDeviceOptionsFromHA() {
+    if (!this._hass || !this._selectedDevice) return;
+    const dev = this._selectedDevice;
+
+    const modeEntity = `select.${dev}_rd_03d_mode`;
+    const speedEntity = `select.${dev}_rd_03d_update_speed`;
+    const excl1Entity = `switch.${dev}_exclusion_1_enable`;
+    const excl2Entity = `switch.${dev}_exclusion_2_enable`;
+
+    const modeState = this._hass.states[modeEntity]?.state;
+    const speedState = this._hass.states[speedEntity]?.state;
+    const excl1State = this._hass.states[excl1Entity]?.state === "on";
+    const excl2State = this._hass.states[excl2Entity]?.state === "on";
+
+    if (this.dialogModeSelect && modeState) {
+      this.dialogModeSelect.value = modeState;
+    }
+    if (this.dialogSpeedSelect && speedState) {
+      this.dialogSpeedSelect.value = speedState;
+    }
+    if (this.dialogExcl1Toggle) {
+      this.dialogExcl1Toggle.checked = !!excl1State;
+    }
+    if (this.dialogExcl2Toggle) {
+      this.dialogExcl2Toggle.checked = !!excl2State;
+    }
+  }
+
+  applyDeviceOptions() {
+    if (!this._hass || !this._selectedDevice) {
+      this.closeDeviceOptionsDialog();
+      return;
+    }
+
+    const dev = this._selectedDevice;
+
+    const mode = this.dialogModeSelect?.value;
+    const speed = this.dialogSpeedSelect?.value;
+    const excl1 = this.dialogExcl1Toggle?.checked;
+    const excl2 = this.dialogExcl2Toggle?.checked;
+
+    const calls = [];
+
+    if (mode) {
+      calls.push(
+        this._hass.callService("select", "select_option", {
+          entity_id: `select.${dev}_rd_03d_mode`,
+          option: mode,
+        })
+      );
+    }
+
+    if (speed) {
+      calls.push(
+        this._hass.callService("select", "select_option", {
+          entity_id: `select.${dev}_rd_03d_update_speed`,
+          option: speed,
+        })
+      );
+    }
+
+    if (typeof excl1 === "boolean") {
+      calls.push(
+        this._hass.callService("switch", excl1 ? "turn_on" : "turn_off", {
+          entity_id: `switch.${dev}_exclusion_1_enable`,
+        })
+      );
+    }
+
+    if (typeof excl2 === "boolean") {
+      calls.push(
+        this._hass.callService("switch", excl2 ? "turn_on" : "turn_off", {
+          entity_id: `switch.${dev}_exclusion_2_enable`,
+        })
+      );
+    }
+
+    Promise.allSettled(calls).finally(() => {
+      this.closeDeviceOptionsDialog();
+    });
+  }
 
   setConfig(config) {
     this._config = config || {};
     this.debug = !!this._config.debug;
     this.debugMode = !!this._config.debug;
 
-    this._loadStyles();   // <-- ADD THIS
+    if (this._config.device_id) {
+      this._selectedDevice = this._config.device_id;
+      // If the canvas is already initialised, update its context now.
+      if (this.radarCanvas && this._hass) {
+        this.radarCanvas.setContext({
+          hass: this._hass,
+          deviceId: this._selectedDevice,
+        });
+        this.syncModelFromHA();
+      }
+    }
   }
 
   getCardSize() {
     return 2;
   }
-}
 
+  static async getConfigElement() {
+
+    await import("./ep-zone-configurator-editor.js");
+    return document.createElement("ep-zone-configurator-editor");
+  }
+
+  static getStubConfig() {
+    return {
+      device_id: "",
+      debug: false,
+    };
+  }
+
+}
 customElements.define("ep-zone-configurator-card", EPZoneConfiguratorCard);
+
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: "ep-zone-configurator-card",
+  name: "Everything Presence Zone Configurator",
+  description: "Visual room-space editor for mmWave zones"
+});
+
+
