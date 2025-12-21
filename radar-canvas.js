@@ -165,7 +165,10 @@ export class RadarCanvas {
             }
 
             case "save": {
-                this.card?.saveZonesToHA?.();
+                //this.card?.saveZonesToHA?.();
+                const snapshot = this.model.exportSnapshot();
+                this.card.hassAdapter.pushCommit(snapshot);
+
                 this.ui.mode = "view";
                 if (this.card) this.card._editMode = false;
                 this.ui.activeZoneId = null;
@@ -2122,7 +2125,7 @@ export class RadarCanvas {
             }
 
             // ✅ Push to HA so HA state matches UI (prevents snap-backs on next HA sync)
-            this.card?.pushPoseToHA?.({ angleDeg: newThetaDeg, rangeM: newRange });
+            //this.card?.pushPoseToHA?.({ angleDeg: newThetaDeg, rangeM: newRange });
 
             this.model.isDirty = true;
         }

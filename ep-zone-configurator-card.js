@@ -2,6 +2,7 @@
 import { LovelaceBridgeInterface } from './lovelace-bridge-interface.js';
 import { RadarCanvas } from './radar-canvas.js';
 import { RadarModel } from './radar-model.js';
+import { HassAdapter } from './hass-adapter.js';
 
 class EPZoneConfiguratorCard extends HTMLElement {
   constructor() {
@@ -12,6 +13,7 @@ class EPZoneConfiguratorCard extends HTMLElement {
     this._editMode = false;
     this._haReady = false;
     this.model = new RadarModel();
+    this.hassAdapter = null;
     this._hass = null;
     this.bridge = null;
     this.debug = false;
@@ -24,6 +26,12 @@ class EPZoneConfiguratorCard extends HTMLElement {
   set hass(hass) {
     // Store a stable reference
     this._hass = hass;
+    if (!this.hassAdapter) {
+      this.hassAdapter = new HassAdapter(hass);
+    } else {
+      // Keep adapter up to date if HA object changes
+      this.hassAdapter.hass = hass;
+    }
     if (this.draging) {
       console.log("hass update received draging");
       return;
@@ -157,6 +165,7 @@ class EPZoneConfiguratorCard extends HTMLElement {
   pushPoseToHA({ angleDeg, rangeM }) {
     if (!this._hass || !this._selectedDevice) return;
     const dev = this._selectedDevice;
+    this.model.commitEdit();
 
     const svc = (entity_id, value) =>
       this._hass.callService("number", "set_value", {
@@ -436,6 +445,7 @@ class EPZoneConfiguratorCard extends HTMLElement {
   saveZonesToHA() {
     if (!this._hass || !this._selectedDevice) return;
     const zones = this.model.zones || {};
+    this.model.commitEdit();
 
     for (const [zoneNum, z] of Object.entries(zones)) {
       if (!z.start || !z.end) continue;

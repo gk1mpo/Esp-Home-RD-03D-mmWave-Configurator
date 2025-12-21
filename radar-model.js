@@ -25,7 +25,31 @@ export class RadarModel {
     this.zones = structuredClone(newZones);
     this._emitChange("zones");
   }
+  beginEdit() {
+    this._editing = true;
+    this._dirty = true;
+  }
 
+  commitEdit() {
+    this._editing = false;
+    this._dirty = false;
+  }
+
+  isDirty() {
+    return !!this._dirty;
+  }
+  exportSnapshot() {
+    const t = this.transform;
+    if (!t) return null;
+
+    return {
+      pose: {
+        angleDeg: t.theta * 180 / Math.PI,
+        rangeM: t.maxRange,
+      },
+      zones: this.zones,
+    };
+  }
   updateTargets(newTargets) {
     this.targets = structuredClone(newTargets);
     this._emitChange("targets");
