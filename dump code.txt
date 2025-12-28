@@ -1,0 +1,290 @@
+_onPointerDown(evt) {
+        //console.log("[RC] PointerDown using instance:", this);
+        //console.log("[RC] this.ui BEFORE setting handle:", this.ui);
+        console.log("[_onPointerDown]  this.ui.activeHandle  start =", this.ui.activeHandle);
+        if (this.ui.pointerId !== null) return;
+        // === Capture this pointer as active ===
+        //started handling this pointer click
+        const params = this.computeGeometry(); 
+        const geom = this.computeGeometry();
+        const pCanvas = this._getCanvasPoint(evt);
+        const pWorld = geom.toWorld(pCanvas.x, pCanvas.y);
+
+        this.dragSnapshot = {
+            geometry: {
+                canvas: geom.canvas,
+                room: structuredClone(geom.room),
+                origin: structuredClone(geom.origin),
+                scale: geom.scale,
+                theta: geom.theta,
+                range: geom.range,
+                toWorld: geom.toWorld,
+                toCanvas: geom.toCanvas
+            },
+            pointerStart: {
+                canvas: pCanvas,
+                world: pWorld
+            },
+            subject: null   // filled below
+        };
+        const p = this._getCanvasPoint(evt);
+        // 1) Toolbar buttons always work
+        for (const btn of Object.values(this._buttons)) {
+            if (btn.visible &&
+                p.x >= btn.x && p.x <= btn.x + btn.w &&
+                p.y >= btn.y && p.y <= btn.y + btn.h) {
+                this._handleUIButton(btn.id);
+                evt.preventDefault(); evt.stopPropagation();
+                return;
+            }
+        }
+        // 2) If not editing, stop here (no zone grabs)
+        if (this.ui.mode !== 'edit') return;
+        // 3) Angle / Range handles (only in edit mode)        
+
+        const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+        ///// handles.angle//////////////
+        if (d(p, geom.handles.angle) < 12) {
+
+            this.ui.pointerId = evt.pointerId;
+            this.ui.activeHandle = 'angle';
+
+            //////////////////////////////////////
+            ///capture snapshot for angle drag
+            //////////////////////////////////////
+            this.dragSnapshot.subject = {
+                type: 'angle',
+                original: { theta: this.theta }
+            };
+
+            try {
+                this.canvas.setPointerCapture(evt.pointerId);
+            } catch (e) {
+                console.warn("Pointer capture failed (angle):", e);
+            }
+            console.log("[_onPointerDown]  this.ui.activeHandle end =", this.ui.activeHandle);
+
+            evt.preventDefault();
+            evt.stopPropagation();
+            return;
+        }
+
+        //// handles.range //////////////
+        if (d(p, geom.handles.range) < 12) {
+            /////////////////////
+            console.log("handles.range", evt.pointerId);
+
+            //////////////////////////////////////
+            ///capture snapshot for Range drag
+            //////////////////////////////////////
+            this.dragSnapshot.subject = {
+                type: 'range',
+                original: { range: this.maxRange }
+            };
+
+            this.ui.pointerId = evt.pointerId;
+            this.ui.activeHandle = 'range';
+            evt.preventDefault();
+            evt.stopPropagation();
+
+            try {
+                this.canvas.setPointerCapture(evt.pointerId);
+            } catch (e) {
+                console.warn("Pointer capture failed:", e);
+            }
+            return;
+        }
+        // 4) Zone hit-test (edit mode only)
+        const { x: px, y: py } = p;
+        let hitZoneId = null, hitHandle = null;
+
+        for (const [id, z] of Object.entries(params.zones || {})) {
+            const hs = this._computeHandlesForZone(z, params);
+            const h = this._hitHandle(px, py, hs);
+            if (h) { hitZoneId = id; hitHandle = h; break; }
+            if (!hitZoneId && this._pointInZone(px, py, z, params)) hitZoneId = id;
+        }
+        if (!hitZoneId) return;
+        //// handles Hit zone //////////////
+        //////////////////////////////////////
+        ///capture snapshot for zone drag
+        //////////////////////////////////////
+        console.log(`[ZoneSelect] Hit zone ${hitZoneId} on pointerdown.`);
+
+        this.dragSnapshot.subject = {
+            type: 'zone',
+            id: hitZoneId,
+            original: structuredClone(this.model.zones[hitZoneId]),
+            handle: {
+                type: hitHandle.type,     // "move" | "corner" | "edge"
+                which: hitHandle.which    // "tl", "r", etc.
+            }
+        };
+        // Capture zone and start drag or selection
+        console.log("Before capture", evt.pointerId);
+        evt.preventDefault();
+        evt.stopPropagation();
+
+        try {
+            this.canvas.setPointerCapture(evt.pointerId);
+        } catch (e) {
+            console.warn("Pointer capture failed:", e);
+        }
+        console.log("After capture (should persist next frame)");
+        this.ui.pointerId = evt.pointerId;
+        this.ui.activeZoneId = hitZoneId;
+        this.ui.activeHandle = hitHandle || { type: "move", which: "c" };
+
+        if (this.ui.activeZoneId && this.ui.mode === 'edit') {
+            const delBtn = Object.values(this._buttons).find(b => b.id === 'delete')
+            if (delBtn) delBtn.visible = true;
+        }
+        evt.preventDefault();
+    }
+    _onPointerMove(evt) {
+
+        function clampZoneToRoom(zone, room) {
+            const minX = 0;
+            const minY = 0;
+            const maxX = room.size;
+            const maxY = room.size;
+
+            const w = zone.end.x - zone.start.x;
+            const h = zone.end.y - zone.start.y;
+
+            zone.start.x = Math.max(minX, Math.min(zone.start.x, maxX - w));
+            zone.start.y = Math.max(minY, Math.min(zone.start.y, maxY - h));
+            zone.end.x = zone.start.x + w;
+            zone.end.y = zone.start.y + h;
+
+            return zone;
+        }
+
+        if (this.ui.pointerId !== evt.pointerId) return;
+        console.log("[_onPointerMove(evt)  this.ui.activeHandle  start =", this.ui.activeHandle);
+
+        ///exit early if no drag snapshot
+        if (!this.dragSnapshot) return;
+        const snap = this.dragSnapshot;
+
+        const pCanvas = this._getCanvasPoint(evt);
+        const pWorld = snap.geometry.toWorld(pCanvas.x, pCanvas.y);
+        //old dx and dy exstaction from snapshort 
+        const dx = pWorld.x - snap.pointerStart.world.x;
+        const dy = pWorld.y - snap.pointerStart.world.y;
+
+
+        if (snap.subject.type === 'zone') {
+            const z = structuredClone(snap.subject.original);
+            z.start.x += dx;
+            z.start.y += dy;
+            z.end.x += dx;
+            z.end.y += dy;
+
+            this.previewZone = z;
+
+            // store as preview ONLY (do not update model)
+
+            // === PREVIEW CLAMP (UX only, frozen geometry) ===
+            this.previewZone = clampZoneToRoom(
+                this.previewZone,
+                snap.geometry.room
+            );
+            this.previewZone = z;
+        }
+        ///////////andgle and range drag//////////////
+        // === 1️⃣ Handle ANGLE and RANGE drag immediately (before other checks)
+        if (this.ui.activeHandle === 'angle') {
+
+            const delta = evt.movementX;
+            const raw = snap.subject.original.theta + delta / 200;
+            //const newTheta = snap.subject.original.theta + delta / 200;
+            //this.previewTheta = newTheta;
+            // clamp preview angle here (UX safety)
+            snap.subject.previewTheta = Math.max(
+                -Math.PI / 4,
+                Math.min(Math.PI / 4, raw)
+            );
+            this.requestDraw();
+            evt.preventDefault();
+
+        }
+        if (this.ui.activeHandle === 'range') {
+            const delta = -evt.movementY;
+            const newRange = snap.subject.original.range + delta / 50;
+            this.requestDraw();
+            evt.preventDefault();
+            return;
+        }
+        // === 2️⃣ Normal zone dragging only valid in edit mode
+        if (this.ui.mode !== 'edit') return;
+
+
+
+        if (!snap || snap.subject.type !== 'zone') return;
+
+        const dz = structuredClone(snap.subject.original);
+        const { type, which } = snap.subject.handle;
+
+        // === Apply edit by handle type (snapshot-driven) ===
+        if (type === "move") {
+            dz.start.x += dx; dz.end.x += dx;
+            dz.start.y += dy; dz.end.y += dy;
+
+        } else if (type === "corner") {
+            if (which.includes("t")) dz.start.y += dy;
+            if (which.includes("b")) dz.end.y += dy;
+            if (which.includes("l")) dz.start.x += dx;
+            if (which.includes("r")) dz.end.x += dx;
+
+        } else if (type === "edge") {
+            if (which === "t") dz.start.y += dy;
+            if (which === "b") dz.end.y += dy;
+            if (which === "l") dz.start.x += dx;
+            if (which === "r") dz.end.x += dx;
+        }
+
+        // optional preview clamp
+        this.previewZone = clampZoneToRoom(dz, snap.geometry.room);
+        console.log("[_onPointerMove(evt)  this.ui.activeHandle  end =", this.ui.activeHandle);
+        this.requestDraw();
+        evt.preventDefault();
+    }
+
+    _onPointerUp(evt) {
+        // Only handle if this pointer was active
+        if (this.ui.pointerId !== evt.pointerId) return;
+        console.log("[ _onPointerUp(evt)  this.ui.activeHandle  start =", this.ui.activeHandle);
+
+        // Release capture immediately
+        this.canvas.releasePointerCapture(evt.pointerId);
+        if (!this.dragSnapshot) return;
+
+        const snap = this.dragSnapshot;
+
+        if (snap.subject.type === 'zone') {
+            let committed = structuredClone(this.previewZone);
+
+            // === FINAL CLAMP (truth safety) ===
+            committed = clampZoneToRoom(
+                committed,
+                this.computeGeometry().room   // current room
+            );
+
+            this.model.updateZones({
+                ...this.model.zones,
+                [snap.subject.id]: committed
+            });
+        }
+
+        // Clear interaction state
+        this.ui.activeHandle = null;
+        this.dragSnapshot = null;
+        this.previewZone = null;
+        this.previewTheta = null;
+        this.previewRange = null;
+        this.ui.pointerId = null;
+        console.log("[ _onPointerUp(evt)  this.ui.activeHandle  end =", this.ui.activeHandle);
+        this.requestDraw();
+    }
