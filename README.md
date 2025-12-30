@@ -160,19 +160,3 @@ Optionally link it back here:
 (see #23)
 
 
-This section becomes your re-entry point after breaks and a scope boundary during development
-
-
-
----
-
-If you want, next we can:
-
-Trim this further into a “Minimal Next Tasks” version, or
-
-Split this into README roadmap + Issues-only execution, or
-
-Add a short “Known Good Baseline” section above it to lock v5.0 visually and architecturally.
-
-
-This is exactly the right move to stabilise the project.
