@@ -49,6 +49,7 @@ class EPZoneConfiguratorCard extends HTMLElement {
 
     // ✅ Always safe now, because syncModelFromHA omits pose while editing
     this.syncModelFromHA();
+    //console.count('[syncModelFromHA]');
 
     // 5️⃣ Show connection label once
     if (!this._haReady && this.shadowRoot) {
@@ -67,14 +68,14 @@ class EPZoneConfiguratorCard extends HTMLElement {
       () => this._loadZonesFromHA?.(),
       (dev) => this.bridge?.getTargets(dev)
     );
-    if(this.debugMode){
-    console.log("[syncModelFromHA]", {
-      hass: !!this._hass,
-      device: this._selectedDevice,
-      editing: this.model?.isEditing(),
-      pose: this.hassAdapter
-        ?.extractSnapshot?.(this._selectedDevice)?.pose
-    });
+    if (this.debugMode) {
+      console.log("[syncModelFromHA]", {
+        hass: !!this._hass,
+        device: this._selectedDevice,
+        editing: this.model?.isEditing(),
+        pose: this.hassAdapter
+          ?.extractSnapshot?.(this._selectedDevice)?.pose
+      });
     }
 
     this.model.acceptExternalSnapshot(snapshot);

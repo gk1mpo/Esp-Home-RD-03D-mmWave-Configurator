@@ -459,6 +459,7 @@ export class RadarCanvas {
         let hitZoneId = null;
         let hitHandle = null;
 
+
         // 1) Toolbar buttons always work
         for (const btn of Object.values(this._buttons)) {
             if (btn.visible &&
@@ -469,10 +470,9 @@ export class RadarCanvas {
                 return;
             }
         }
-
-        // 🔑 ENTER EDIT MODE ON FIRST USER INTERACTION
-        if (!this.model.isEditing()) {
-            this.model.beginEdit();
+        // 🔒 HARD GATE: no canvas interaction unless explicitly editing
+        if (this.ui.mode !== "edit") {
+            return;
         }
 
         // --- ZONE HIT TEST ---
@@ -511,6 +511,7 @@ export class RadarCanvas {
         if (hitZoneId) {
             this.ui.pointerId = evt.pointerId;
             this.ui.activeZoneId = hitZoneId;
+            this._updateToolbarVisibility();
             this.ui.activeHandle = hitHandle || { type: 'move', which: 'c' };
 
             this.ui.dragStart = {
@@ -718,7 +719,7 @@ export class RadarCanvas {
             case "save": {
                 //this.card?.saveZonesToHA?.();
                 const snapshot = this.model.exportSnapshot();
-                this.card.hassAdapter.pushCommit(snapshot, this._selectedDevice);
+                this.card.hassAdapter.pushCommit(snapshot, this.model.zones,this._selectedDevice);
                 this.model.commitEdit();
 
                 this.ui.mode = "view";
@@ -742,21 +743,16 @@ export class RadarCanvas {
             case 'delete': {
                 const zoneId = this.ui.activeZoneId;
                 if (zoneId) {
-                    const zones = { ...this.model?.zones };
+                    const zones = this.model.zones;
+                    //delete zones[zoneId];
+                    //this.model.updateZones(zones };
                     delete zones[zoneId];
                     this.model?.updateZones(zones);
                     this.model.beginEdit();
-
-                    // Tell card that deletion affects HA
-                    if (this.card) {
-                        this.card._deletedZone = zoneId;   // mark for HA clean-up
-                        //this.card._editMode = true;
-                    }
-
-                    this.ui.activeZoneId = null;
-                    this.model._dirty = true;
+                    this._updateToolbarVisibility();
+                    this.ui.activeZoneId = null;                    
                 }
-                this._updateToolbarVisibility();
+                
                 this.requestDraw();
                 break;
             }
@@ -1033,7 +1029,7 @@ export class RadarCanvas {
         ctx.lineWidth = 1;
 
         // Vertical and horizontal 1 m grid lines inside the room box
-        for (let m = 1; m < maxM; m++) {
+        for (let m = 1; m <= maxM; m++) {
             const offset = m * scale;
 
             // Vertical line

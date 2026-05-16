@@ -2,14 +2,6 @@
 Config files for my GitHub profile.
 ## Next Tasks
 
-This section tracks planned improvements and known gaps.
-Items are grouped by priority and may be promoted to GitHub Issues
-once implementation starts.
-
----
-
-Next Tasks
-
 This section tracks planned improvements and known limitations.
 Items are intentionally explicit to avoid UI drift and Home Assistant state spam.
 
@@ -141,6 +133,8 @@ Design Guardrails (Non-Negotiable)
 [ ] UI gates edits and controls HA write timing
 
 [ ] No new features that blur these responsibilities
+
+- No refactors without a behaviour-preserving justification
 
 
 

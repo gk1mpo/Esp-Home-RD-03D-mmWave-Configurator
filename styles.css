@@ -1,6 +1,16 @@
 /*******************************************************
  * EP Zone Configurator – Clean HA-Native CSS
  *******************************************************/
+/*******************************************************
+ * EP Zone Configurator – Clean HA-Native CSS
+ * RULE OF THE UNIVERSE:
+ * - Browser reads TOP to BOTTOM
+ * - If two rules conflict, the LOWER one wins
+ *******************************************************/
+
+/* =========================
+   1) BASE LAYOUT
+   ========================= */
 
 /* Outer container for the entire card */
 .epz-container {
@@ -10,19 +20,36 @@
   align-items: center;
 
   /* Prevent card collapsing in HA */
-  min-height: 420px;
+  min-height: 90vh;
+  /*min-height: 420px;*/
   box-sizing: border-box;
   padding-bottom: 12px;
 }
 
+/* Canvas wrapper (the box that controls canvas size) */
+.canvas-wrapper {
+  flex: 1;
+  width: 100%;
+  max-width: 100%;
+  position: relative;
 
+  /* Default desktop/tablet shape */
+  aspect-ratio: 1 / 1;
 
-/* The canvas itself */
+  /* Prevent canvas from dominating by accident */
+  max-height: 600px;
+}
+
+/* If you have a canvas cell wrapper in your DOM */
+.epz-canvas-cell {
+  width: 100%;
+  position: relative;
+}
+
+/* The canvas itself (fill the wrapper) */
 #visualizationCanvas {
   width: 100% !important;
-  /* Fit HA card width */
-  height: auto !important;
-  /* Natural aspect ratio */
+  height: 100% !important;
   display: block;
 
   /* Touch & gesture safety for mobile */
@@ -32,20 +59,80 @@
   image-rendering: crisp-edges;
 }
 
+/* Some builds use this selector instead/as well */
+.epz-canvas-cell canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* =========================
+   2) TOOLBAR
+   ========================= */
+
 /* Toolbar area under canvas */
 .epz-toolbar-area {
   width: 100%;
   max-width: 100%;
   display: flex;
   justify-content: center;
+  flex-wrap: wrap;
+  /* prevents overflow on narrow screens */
+  gap: 10px;
   box-sizing: border-box;
-
   margin-top: 8px;
+
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
-/*******************************************************
- * Home Assistant Native Card Integration
- *******************************************************/
+.epz-toolbar-area:empty {
+  padding: 0;
+  margin: 0;
+}
+
+/* Fix the "icons too big / clipped" problem */
+.epz-toolbar-area button {
+  box-sizing: border-box;
+
+  /* Touch targets */
+  min-width: 44px;
+  min-height: 44px;
+
+  /* Make icon + label behave */
+  padding: 6px 6px 4px;
+  /* small top bias prevents top clipping */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+
+  line-height: 1.1;
+}
+
+/* Constrain icon size (prevents huge boxes / clipping) */
+.epz-toolbar-area button svg,
+.epz-toolbar-area button .icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+  margin-bottom: 2px;
+}
+
+/* Prevent label text clipping on mobile */
+.epz-toolbar-area button span,
+.epz-toolbar-area button label {
+  font-size: 0.75rem;
+  line-height: 1.2;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+/* =========================
+   3) HOME ASSISTANT THEME HOOKS
+   ========================= */
+
 .epz-container,
 .canvas-wrapper,
 .epz-toolbar-area {
@@ -53,9 +140,17 @@
   color: var(--primary-text-color);
 }
 
-/*******************************************************
- * Sidebar (Zones list)
- *******************************************************/
+/* Host padding (keeps content away from edges) */
+:host {
+  display: block;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+/* =========================
+   4) SIDEBAR (Zones list) – keep if still used
+   ========================= */
+
 .zone-sidebar {
   background: var(--ha-card-background, var(--card-background-color));
   color: var(--primary-text-color);
@@ -78,9 +173,7 @@
   color: var(--primary-text-color);
 }
 
-/*******************************************************
- * Sidebar buttons
- *******************************************************/
+/* Sidebar buttons */
 .zone-sidebar button {
   appearance: none;
   border: 1px solid var(--divider-color, #aaa);
@@ -98,47 +191,9 @@
   background: var(--secondary-hover-background-color, #d5d5d5);
 }
 
-/*******************************************************
- * Mobile behaviour (HA app + Chrome mobile)
- *******************************************************/
-@media (max-width: 800px) {
-  .epz-container {
-    min-height: 380px;
-  }
-
-  .canvas-wrapper {
-    min-height: 360px;
-  }
-
-  .zone-sidebar {
-    width: 100%;
-    max-width: 100%;
-    border-left: none;
-    border-top: 1px solid var(--divider-color, #ccc);
-  }
-}
-
-:host {
-  display: block;
-  padding-left: 16px;
-  padding-right: 16px;
-}
-
-.epz-container {
-  width: 100%;
-}
-
-
-
-
-
-.epz-canvas-cell canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100% !important;
-  height: 100% !important;
-}
+/* =========================
+   5) MENU + DIALOG (settings)
+   ========================= */
 
 .epz-menu-button {
   border: none;
@@ -215,22 +270,35 @@
   color: var(--secondary-text-color, #666);
 }
 
-.epz-dialog-buttons .epz-dialog-save {
-  background: var(--primary-color, #03a9f4);
-  color: #fff;
+/* =========================
+   6) MOBILE OVERRIDES
+   These go LAST so they override desktop rules.
+   ========================= */
+
+@media (max-width: 768px) {
+  .epz-container {
+    min-height: 380px;
+    padding-bottom: 10px;
+  }
+
+  /* Keep canvas from overpowering UI */
+  .canvas-wrapper {
+    max-height: 55vh;
+    aspect-ratio: 1 / 1;
+  }
+
+  /* Sidebar becomes full width if used */
+  .zone-sidebar {
+    width: 100%;
+    max-width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--divider-color, #ccc);
+  }
 }
 
-.epz-container .canvas-wrapper {
-  width: 100%;
-  aspect-ratio: 1 / 1.2;
-  /* or 1 / 1.35, 1 / 1.4 etc. */
-  position: relative;
-  display: block;
-  margin: 0 auto;
-}
-
-#visualizationCanvas {
-  width: 100% !important;
-  height: 100% !important;
-  display: block;
+/* Landscape gets a bit more conservative with canvas height */
+@media (max-width: 768px) and (orientation: landscape) {
+  .canvas-wrapper {
+    max-height: 45vh;
+  }
 }
